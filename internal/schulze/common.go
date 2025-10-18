@@ -3,7 +3,9 @@ package schulze
 import (
 	"context"
 	"fmt"
-	"vote_system/internal/models"
+
+	"github.com/lsdpls/schulze_election_telegram_bot/internal/config"
+	"github.com/lsdpls/schulze_election_telegram_bot/internal/models"
 
 	"github.com/sirupsen/logrus"
 )
@@ -76,7 +78,7 @@ func (s *Schulze) excludeCourseWinners(ctx context.Context, allCandidates []mode
 		winnerID := result.WinnerCandidateID[0]
 		excludedCandidateIDs[winnerID] = true
 	}
-	commonPlaces := 10 - len(excludedCandidateIDs)
+	commonPlaces := config.TotalPlaces - len(excludedCandidateIDs)
 
 	commonCandidates := make([]models.Candidate, 0)
 	for _, candidate := range allCandidates {

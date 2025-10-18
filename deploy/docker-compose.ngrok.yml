@@ -17,7 +17,7 @@ services:
 
 
   bot:
-    build: .
+    build: ..
     container_name: bot
     ports:
       - "8080:8080"

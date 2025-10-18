@@ -9,7 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	emailSender "vote_system/internal/email"
+
+	emailSender "github.com/lsdpls/schulze_election_telegram_bot/internal/email"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
@@ -48,7 +49,7 @@ func (b *Bot) handleEmailInput(ctx context.Context, message *tgbotapi.Message) {
 
 	// Проверяем формат email
 	if !isValidEmail(email) {
-		log.Warn(telegramID, " Неверный формат почты")
+		log.Debug(telegramID, " Неверный формат почты")
 		b.SendMessage(telegramID, "Неверный формат почты. Пожалуйста, введите почту в формате stXXXXXX.")
 		return
 	}
@@ -92,7 +93,7 @@ func (b *Bot) handleEmailInput(ctx context.Context, message *tgbotapi.Message) {
 		b.SendMessage(telegramID, "Произошла ошибка при отправке кода на почту. Пожалуйста, попробуйте снова")
 		return
 	}
-	log.Infof("%d Код подтверждения %d отправлен на почту: %s", telegramID, code, email)
+	log.Debugf("%d Код подтверждения %d отправлен на почту", telegramID, code)
 	// Сохраняем сгенерированный код в мапу для дальнейшей проверки
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -114,7 +115,7 @@ func (b *Bot) handleCodeInput(ctx context.Context, message *tgbotapi.Message) {
 	// Извлекаем введенный код
 	code, err := strconv.Atoi(message.Text)
 	if err != nil {
-		log.Warn(telegramID, " Неверный формат кода")
+		log.Debug(telegramID, " Неверный формат кода")
 		b.SendMessage(telegramID, "Неверный формат кода. Пожалуйста, введите числовой код.")
 		return
 	}
@@ -129,7 +130,7 @@ func (b *Bot) handleCodeInput(ctx context.Context, message *tgbotapi.Message) {
 	}
 	// Сравниваем введенный код с ожидаемым
 	if code != expectedCode {
-		log.Warn(telegramID, " Неверный код")
+		log.Debug(telegramID, " Неверный код")
 		b.SendMessage(telegramID, "Неверный код. Попробуйте еще раз.")
 		return
 	}

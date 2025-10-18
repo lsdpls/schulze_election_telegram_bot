@@ -10,24 +10,24 @@ import (
 
 	log "github.com/sirupsen/logrus"
 
-	"vote_system/internal/bot"
-	"vote_system/internal/chain"
-	"vote_system/internal/db"
-	"vote_system/internal/schulze"
+	"github.com/lsdpls/schulze_election_telegram_bot/internal/api"
+	"github.com/lsdpls/schulze_election_telegram_bot/internal/bot"
+	"github.com/lsdpls/schulze_election_telegram_bot/internal/chain"
+	"github.com/lsdpls/schulze_election_telegram_bot/internal/config"
+	"github.com/lsdpls/schulze_election_telegram_bot/internal/db"
+	"github.com/lsdpls/schulze_election_telegram_bot/internal/schulze"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
 
 func main() {
-
-	// Читаем переменную окружения с URL базы данных
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		log.Fatal("DATABASE_URL environment variable is required")
+	// Загружаем конфигурацию
+	if err := config.LoadConfig(); err != nil {
+		log.Fatalf("Failed to load config: %v", err)
 	}
 
 	// Инициализируем структуру Storage и UserChain
-	storage, err := db.NewStorage(dsn)
+	storage, err := db.NewStorage(config.DatabaseURL)
 	if err != nil {
 		log.Fatalf("unable to connect Storage: %v", err)
 	}
@@ -35,14 +35,8 @@ func main() {
 
 	voteChain := chain.NewVoteChain(storage)
 
-	// Читаем токен для Telegram бота
-	token := os.Getenv("TELEGRAM_APITOKEN")
-	if token == "" {
-		log.Fatal("TELEGRAM_BOT_TOKEN environment variable is required")
-	}
-
 	// Инициализируем бота
-	botAPI, err := tgbotapi.NewBotAPI(token)
+	botAPI, err := tgbotapi.NewBotAPI(config.TelegramAPIToken)
 	if err != nil {
 		log.Fatalf("unable to connect botAPI: %v", err)
 	}
@@ -57,23 +51,27 @@ func main() {
 	botHandler := bot.NewBot(botAPI, voteChain, schulze)
 	defer botHandler.Close()
 
-	// Устанавливаем обработчик для обновлений
+	// Инициализируем API handler
+	apiHandler := api.NewHandler(voteChain)
+
+	// Health check должен быть ПЕРЕД catch-all обработчиком
+	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("healthy"))
+	})
+	http.HandleFunc("/votes", apiHandler.GetVotes)
+	http.HandleFunc("/candidates", apiHandler.GetCandidates)
+	http.HandleFunc("/result", apiHandler.GetResults)
+	// Catch-all обработчик для webhook (должен быть последним)
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		botHandler.HandleWebhook(w, r)
 	})
-	http.HandleFunc("/results", func(w http.ResponseWriter, r *http.Request) {
-		//TODO
-	})
 
 	// Запускаем HTTP сервер
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "8080"
-	}
-	srv := &http.Server{Addr: ":" + port}
+	srv := &http.Server{Addr: ":" + config.AppPort}
 
 	go func() {
-		log.Infof("Starting server on port %s", port)
+		log.Infof("Starting server on port %s", config.AppPort)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("Error starting server: %v", err)
 		}

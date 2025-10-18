@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"github.com/lsdpls/schulze_election_telegram_bot/internal/utils"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
@@ -22,7 +23,11 @@ var helpText = "Принцип голосования по методу Шуль
 // Обработчик команды /vote
 func (b *Bot) handleVote(ctx context.Context, message *tgbotapi.Message) {
 	telegramID := message.Chat.ID
-	if !activeVoting {
+	b.mu.RLock()
+	isActive := b.activeVoting
+	b.mu.RUnlock()
+
+	if !isActive {
 		log.Warn(telegramID, " Попытка начать голосование при закрытом голосовании")
 		b.SendMessage(telegramID, "Голосование уже завершилось или еще не началось")
 		return
@@ -43,7 +48,11 @@ func (b *Bot) handleVote(ctx context.Context, message *tgbotapi.Message) {
 		log.Errorf("%d Ошибка получения памятки к голосованию: %v", telegramID, err)
 	}
 
-	if err := b.SendMessage(telegramID, candidatesList); err != nil {
+	b.mu.RLock()
+	candidatesListCopy := b.candidatesList
+	b.mu.RUnlock()
+
+	if err := b.SendMessage(telegramID, candidatesListCopy); err != nil {
 		log.Errorf("%d Ошибка отправки списка кандидатов: %v", telegramID, err)
 	}
 
@@ -108,7 +117,11 @@ func (b *Bot) sendCandidateKeyboard(_ context.Context, message *tgbotapi.Message
 // Получение ответа кнопки
 func (b *Bot) handleCallbackQuery(ctx context.Context, query *tgbotapi.CallbackQuery) {
 	telegramID := query.From.ID
-	if !activeVoting {
+	b.mu.RLock()
+	isActive := b.activeVoting
+	b.mu.RUnlock()
+
+	if !isActive {
 		log.Warn(telegramID, " Попытка голосования при закрытом голосовании")
 		b.SendMessage(telegramID, "Голосование уже завершилось или еще не началось")
 		return
@@ -183,8 +196,16 @@ func (b *Bot) sendRankedList(ctx context.Context, query *tgbotapi.CallbackQuery)
 		b.SendMessage(telegramID, "Произошла ошибка при регистрации голоса. Пожалуйста, попробуйте снова")
 		return
 	}
+
+	// Генерируем токен из telegramID (детерминированный, каждый раз одинаковый)
+	voteToken := utils.GenerateVoteToken(telegramID)
+
 	// Уведомляем, что голос учтен
-	if err := b.SendMessage(telegramID, "Ваш бюллетень принят✅\nВы можете изменить свой бюллетень до окончания голосования, проголосовав заново, отправив для этого команду /vote"); err != nil {
+	successMessage := "<b>Ваш бюллетень принят✅</b>\n\n" +
+		"Вы можете изменить свой бюллетень до окончания голосования, проголосовав заново, отправив для этого команду /vote\n\n" +
+		"🔑 <code>" + voteToken + "</code>"
+
+	if err := b.SendMessage(telegramID, successMessage); err != nil {
 		log.Errorf("%d ошибка ответа о принятии бюллетеня: %v", telegramID, err)
 	}
 	log.Info(query.From.ID, " Голос учтен")

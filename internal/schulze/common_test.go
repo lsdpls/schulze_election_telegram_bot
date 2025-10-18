@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 	"testing"
-	"vote_system/internal/models"
-	mock "vote_system/internal/schulze/mocks"
+	"github.com/lsdpls/schulze_election_telegram_bot/internal/models"
+	mock "github.com/lsdpls/schulze_election_telegram_bot/internal/schulze/mocks"
 
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"

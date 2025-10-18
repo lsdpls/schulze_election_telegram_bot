@@ -4,13 +4,12 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"strconv"
+
+	"github.com/lsdpls/schulze_election_telegram_bot/internal/config"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"github.com/sirupsen/logrus"
 )
-
-var logChatID, _ = strconv.ParseInt(os.Getenv("LOG_CHAT_ID"), 10, 64)
 
 type Logger struct {
 	loggerBotAPI *tgbotapi.BotAPI
@@ -144,7 +143,10 @@ func (l *Logger) Panicf(format string, args ...interface{}) {
 
 // Send notification to the log chat
 func (l *Logger) sendNotification(message string) {
-	msg := tgbotapi.NewMessage(logChatID, message)
+	if config.LogChatID == 0 {
+		return // Не отправляем уведомления, если LogChatID не настроен
+	}
+	msg := tgbotapi.NewMessage(config.LogChatID, message)
 	msg.ParseMode = "HTML"
 	if _, err := l.loggerBotAPI.Send(msg); err != nil {
 		l.entry.Debugf("Ошибка при отправке уведомления: %v", err)

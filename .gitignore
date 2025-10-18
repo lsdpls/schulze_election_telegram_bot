@@ -5,6 +5,7 @@
 *.dylib
 *.log
 
+logs/
 *.test
 *.out
 *.env

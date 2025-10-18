@@ -3,7 +3,8 @@ package schulze
 import (
 	"context"
 	"fmt"
-	"vote_system/internal/models"
+
+	"github.com/lsdpls/schulze_election_telegram_bot/internal/models"
 
 	"github.com/sirupsen/logrus"
 )
