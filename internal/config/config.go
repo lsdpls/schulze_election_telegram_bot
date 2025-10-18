@@ -33,6 +33,10 @@ var VoteTokenSecret string
 // Election
 var TotalPlaces int
 
+// Logging
+var LogLevel string
+var TelegramLogLevel string
+
 // LoadConfig загружает и валидирует конфигурацию из переменных окружения
 func LoadConfig() error {
 	// Telegram Bot
@@ -143,6 +147,17 @@ func LoadConfig() error {
 		PostgresDB,
 		PostgresSSLMode,
 	)
+
+	// Logging
+	LogLevel = os.Getenv("LOG_LEVEL")
+	if LogLevel == "" {
+		LogLevel = "debug" // Значение по умолчанию
+	}
+
+	TelegramLogLevel = os.Getenv("TELEGRAM_LOG_LEVEL")
+	if TelegramLogLevel == "" {
+		TelegramLogLevel = "info" // Значение по умолчанию
+	}
 
 	return nil
 }

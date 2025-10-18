@@ -45,7 +45,7 @@ type Bot struct {
 
 // NewBot создает новый экземпляр бота
 func NewBot(botAPI *tgbotapi.BotAPI, voteChain voteChain, schulze schulze) *Bot {
-	log = logger.NewLogger(botAPI, "Info")
+	log = logger.NewLogger(botAPI, config.LogLevel, config.TelegramLogLevel)
 	return &Bot{
 		botAPI:         botAPI,
 		voteChain:      voteChain,
