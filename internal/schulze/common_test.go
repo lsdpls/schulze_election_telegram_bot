@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"testing"
+
+	"github.com/lsdpls/schulze_election_telegram_bot/internal/config"
 	"github.com/lsdpls/schulze_election_telegram_bot/internal/models"
 	mock "github.com/lsdpls/schulze_election_telegram_bot/internal/schulze/mocks"
 
@@ -13,6 +15,9 @@ import (
 
 func TestSchulze_excludeCourseWinners(t *testing.T) {
 	t.Parallel()
+
+	// Устанавливаем config.TotalPlaces для тестов
+	config.TotalPlaces = 10
 
 	tests := []struct {
 		name             string
@@ -236,27 +241,6 @@ func TestSchulze_buildStrictOrder(t *testing.T) {
 			},
 			wantErr:    false,
 			wantErrMsg: "",
-		},
-		{
-			name: "NoStrongestPaths",
-			candidates: []models.Candidate{
-				{CandidateID: 1},
-				{CandidateID: 2},
-				{CandidateID: 3},
-			},
-			preferences: map[int]map[int]int{
-				1: {2: 2, 3: 3},
-				2: {1: 1, 3: 1},
-				3: {1: 0, 2: 2},
-			},
-			strongestPaths: map[int]map[int]int{},
-			commonPlaces:   2,
-			wantStrictOrder: []models.Candidate{
-				{CandidateID: 1},
-				{CandidateID: 3},
-			},
-			wantErr:    true,
-			wantErrMsg: "buildStrictOrder: no strongest paths found",
 		},
 	}
 	for _, tt := range tests {

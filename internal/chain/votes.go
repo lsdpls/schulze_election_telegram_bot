@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"time"
+
 	"github.com/lsdpls/schulze_election_telegram_bot/internal/models"
 
 	"github.com/jackc/pgx/v5"

@@ -126,7 +126,7 @@ func (s *Schulze) buildStrictOrder(candidates []models.Candidate, preferences, s
 			}
 			// Если ничья не разрешена, то у нас слишком глубокая ничья
 			if len(potentialWinners) > 1 {
-				return nil, fmt.Errorf("нет строгого порядка: слишком глубокая ничья")
+				return nil, fmt.Errorf("buildStrictOrder: too deep tie")
 			}
 		}
 

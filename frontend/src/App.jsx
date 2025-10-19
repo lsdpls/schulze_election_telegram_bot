@@ -17,7 +17,7 @@ function App() {
     return text.split(' ').map(word => word[0]).join('');
   };
 
-  const MatrixTable = ({ data, type = 'preferences' }) => {
+  const MatrixTable = ({ data, type = 'preferences', candidates: candidatesData }) => {
     const [hoveredCell, setHoveredCell] = useState(null);
     
     try {
@@ -57,14 +57,14 @@ function App() {
               <tr>
                 <th></th>
                 {candidates.map(candidate => (
-                  <th key={candidate}>К{candidate}</th>
+                  <th key={candidate}>{candidatesData[candidate]?.name || `К${candidate}`}</th>
                 ))}
               </tr>
             </thead>
             <tbody>
               {candidates.map(rowCandidate => (
                 <tr key={rowCandidate}>
-                  <td className="matrix-label">К{rowCandidate}</td>
+                  <td className="matrix-label">{candidatesData[rowCandidate]?.name || `К${rowCandidate}`}</td>
                   {candidates.map(colCandidate => (
                     <td 
                       key={colCandidate} 
@@ -196,11 +196,15 @@ function App() {
           <div className="votes-header">
             <div className="header-token">Токен голоса</div>
             <div className="header-rankings">
-              <div className="header-position">1</div>
-              <div className="header-position">2</div>
-              <div className="header-position">3</div>
-              <div className="header-position">4</div>
-              <div className="header-position">5</div>
+              {(() => {
+                const candidatesCount = Object.keys(candidates).length;
+                const voteLength = votes.length > 0 ? votes[0].candidate_rankings.length : 0;
+                const headerCount = candidatesCount > 0 ? candidatesCount : voteLength;
+                
+                return headerCount > 0 && Array.from({ length: headerCount }, (_, index) => (
+                  <div key={index + 1} className="header-position">{index + 1}</div>
+                ));
+              })()}
             </div>
           </div>
           <div className="votes-list">
@@ -213,7 +217,6 @@ function App() {
                     return (
                       <div key={idx} className="candidate-badge">
                         <span className="name">{candidate?.name || `#${candidateId}`}</span>
-                        <span className="course">{candidate?.course || ''}</span>
                       </div>
                     );
                   })}
@@ -260,7 +263,7 @@ function App() {
                   <div className="result-matrix">
                     <h4>Парные предпочтения:</h4>
                     <div className="matrix-container">
-                      <MatrixTable data={result.preferences} type="preferences" />
+                      <MatrixTable data={result.preferences} type="preferences" candidates={candidates} />
                     </div>
                   </div>
                 )}
@@ -269,7 +272,7 @@ function App() {
                   <div className="result-matrix">
                     <h4>Сильнейшие пути:</h4>
                     <div className="matrix-container">
-                      <MatrixTable data={result.strongest_paths} type="strongest_paths" />
+                      <MatrixTable data={result.strongest_paths} type="strongest_paths" candidates={candidates} />
                     </div>
                   </div>
                 )}
