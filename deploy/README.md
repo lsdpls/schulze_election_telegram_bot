@@ -6,7 +6,7 @@
 
 ```
 deploy/
-├── configs/           # Конфигурационные файлы
+├── nginx/             # Конфигурация Nginx
 │   └── nginx.conf     # Конфигурация Nginx для production
 ├── scripts/           # Скрипты автоматизации
 │   └── setup-domain.sh # Настройка домена и SSL

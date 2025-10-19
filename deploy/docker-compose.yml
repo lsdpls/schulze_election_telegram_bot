@@ -27,7 +27,7 @@ services:
       - "80:80"
       - "443:443"
     volumes:
-      - ./configs/nginx.conf:/etc/nginx/templates/default.conf.template
+      - ./nginx/nginx.conf:/etc/nginx/templates/default.conf.template
       - /etc/letsencrypt:/etc/letsencrypt
     env_file:
       - .env

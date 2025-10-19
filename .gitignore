@@ -16,3 +16,4 @@ postgres.session.sql
 draft/
 **/mocks
 *.csv
+main
