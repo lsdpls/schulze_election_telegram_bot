@@ -1,0 +1,26 @@
+FROM golang:1.23-alpine AS build
+WORKDIR /build
+
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . ./
+
+RUN apk --no-cache add ca-certificates
+
+RUN CGO_ENABLED=0 GOOS=linux go build -o /bin/app ./cmd/main.go
+
+RUN mkdir -p /bin/logs
+RUN apk add tzdata
+
+FROM scratch AS final
+WORKDIR /
+
+COPY --from=build /bin/app /app
+COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+COPY --from=build /bin/logs /logs
+COPY --from=build /usr/share/zoneinfo /usr/share/zoneinfo
+ENV TZ=Europe/Moscow
+
+EXPOSE 8080
+
+ENTRYPOINT ["/app"]

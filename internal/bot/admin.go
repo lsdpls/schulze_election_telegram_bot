@@ -9,7 +9,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"vote_system/internal/models"
+
+	"github.com/lsdpls/schulze_election_telegram_bot/internal/models"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
@@ -61,10 +62,6 @@ func (b *Bot) handleAddDelegate(ctx context.Context, message *tgbotapi.Message) 
 	}
 	name := parts[1]
 	group := parts[2]
-	if !isValidGroup(group) {
-		log.Warn(chatID, " Неверный формат group. Используйте: XX.(Б|М)XX-пу")
-		return
-	}
 
 	// Создаем делегата
 	delegate := models.Delegate{
@@ -324,13 +321,17 @@ func (b *Bot) handleStartVoting(_ context.Context, message *tgbotapi.Message) {
 		log.Errorf("%d Ошибка при обновлении списка кандидатов: %v", message.From.ID, err)
 		return
 	}
-	activeVoting = true
+	b.mu.Lock()
+	b.activeVoting = true
+	b.mu.Unlock()
 	log.Warn(message.From.ID, " Голосование открыто!")
 }
 
 // Обработчик команды /stop_voting
 func (b *Bot) handleStopVoting(_ context.Context, message *tgbotapi.Message) {
-	activeVoting = false
+	b.mu.Lock()
+	b.activeVoting = false
+	b.mu.Unlock()
 	log.Warn(message.From.ID, " Голосование закрыто!")
 }
 
@@ -374,7 +375,7 @@ func isValidCourse(course string) bool {
 	return re.MatchString(course)
 }
 
-// Проверка формата группы (XX.(б|м)XX-пу)
+// Deprecated: Проверка формата группы (XX.(б|м)XX-пу)
 func isValidGroup(group string) bool {
 	// курс должен быть XX.(б|м)XX-пу
 	re := regexp.MustCompile(`^\d{2}\.(Б|М)\d{2}-пу$`)
@@ -408,6 +409,7 @@ func (b *Bot) handleResults(ctx context.Context, message *tgbotapi.Message) {
 	b.handleCSV(ctx, message)
 }
 
+// TODO: move to utils
 // Функция для разбивки сообщения на части по заданному размеру
 func splitMessage(message string, maxSize int) []string {
 	var msgParts []string

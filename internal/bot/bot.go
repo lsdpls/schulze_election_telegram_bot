@@ -6,13 +6,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"os"
 	"sort"
-	"strconv"
 	"sync"
 	"time"
-	"vote_system/internal/logger"
-	"vote_system/internal/models"
+
+	"github.com/lsdpls/schulze_election_telegram_bot/internal/config"
+	"github.com/lsdpls/schulze_election_telegram_bot/internal/logger"
+	"github.com/lsdpls/schulze_election_telegram_bot/internal/models"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
@@ -23,13 +23,7 @@ const (
 	StateWaitingForCode  = "waiting_for_code"
 )
 
-// TODO подумать над заменой на Atoi
-// ID чата для админ-панели
-var adminChatID, _ = strconv.ParseInt(os.Getenv("ADMIN_CHAT_ID"), 10, 64)
 var log *logger.Logger
-
-var candidatesList string
-var activeVoting bool
 
 // Bot struct for managing commands and Telegram API
 type Bot struct {
@@ -38,27 +32,31 @@ type Bot struct {
 	schulze   schulze          // структура для работы с алгоритмом Шульце
 	mu        sync.RWMutex     // Блокировка ресурсов
 
+	// TODO: create user session struct
 	userStates          map[int64]string // Состояния пользователей, где ключ — telegramID, а значение — текущее состояние
 	codeStore           map[int64]int    // Хранение кодов подтверждения (telegramID -> код)
 	userEmail           map[int64]int    // Хранение не верифицированных email пользователей (telegramID -> email)
 	Candidates          map[int]models.Candidate
 	sortedCandidatesIDs []int
 	rankedList          map[int64][]int // Хранение незаполненных бюллетеней
+	candidatesList      string          // Список кандидатов для отправки пользователям
+	activeVoting        bool            // Флаг активного голосования
 }
 
 // NewBot создает новый экземпляр бота
 func NewBot(botAPI *tgbotapi.BotAPI, voteChain voteChain, schulze schulze) *Bot {
-	log = logger.NewLogger(botAPI, "Info")
-	activeVoting = false
+	log = logger.NewLogger(botAPI, config.LogLevel, config.TelegramLogLevel)
 	return &Bot{
-		botAPI:     botAPI,
-		voteChain:  voteChain,
-		schulze:    schulze,
-		userStates: make(map[int64]string),
-		codeStore:  make(map[int64]int),
-		userEmail:  make(map[int64]int),
-		rankedList: make(map[int64][]int),
-		Candidates: make(map[int]models.Candidate),
+		botAPI:         botAPI,
+		voteChain:      voteChain,
+		schulze:        schulze,
+		userStates:     make(map[int64]string),
+		codeStore:      make(map[int64]int),
+		userEmail:      make(map[int64]int),
+		rankedList:     make(map[int64][]int),
+		Candidates:     make(map[int]models.Candidate),
+		candidatesList: "",
+		activeVoting:   false,
 	}
 }
 
@@ -124,9 +122,9 @@ func (b *Bot) SetCandidates() error {
 	}
 	sort.Ints(b.sortedCandidatesIDs)
 
-	candidatesList = "Cписок кандидатов:\n\n"
+	b.candidatesList = "Cписок кандидатов:\n\n"
 	for _, k := range b.sortedCandidatesIDs {
-		candidatesList += fmt.Sprintf("• %s, %s\n", b.Candidates[k].Name, b.Candidates[k].Course)
+		b.candidatesList += fmt.Sprintf("• %s, %s\n", b.Candidates[k].Name, b.Candidates[k].Course)
 	}
 
 	return nil
@@ -168,7 +166,7 @@ func (b *Bot) HandleUpdate(ctx context.Context, update tgbotapi.Update) {
 // HandleCommand обрабатывает команды пользователя
 func (b *Bot) handleCommand(ctx context.Context, message *tgbotapi.Message) {
 	// Проверка администратора
-	if message.Chat.ID == adminChatID {
+	if message.Chat.ID == config.AdminChatID {
 		switch message.Command() {
 		// Изменение базы данных
 		case "add_delegate":
@@ -232,7 +230,11 @@ func (b *Bot) handleCommand(ctx context.Context, message *tgbotapi.Message) {
 
 // HandleText обрабатывает текстовые сообщения пользователя
 func (b *Bot) handleText(ctx context.Context, message *tgbotapi.Message) {
-	switch b.userStates[message.Chat.ID] {
+	b.mu.RLock()
+	state := b.userStates[message.Chat.ID]
+	b.mu.RUnlock()
+
+	switch state {
 	case StateWaitingForEmail:
 		b.handleEmailInput(ctx, message)
 	case StateWaitingForCode:

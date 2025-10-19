@@ -3,7 +3,7 @@ package schulze
 import (
 	"reflect"
 	"testing"
-	"vote_system/internal/models"
+	"github.com/lsdpls/schulze_election_telegram_bot/internal/models"
 
 	"github.com/stretchr/testify/assert"
 )
