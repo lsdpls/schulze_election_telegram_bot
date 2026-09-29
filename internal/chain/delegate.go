@@ -3,11 +3,15 @@ package chain
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"github.com/lsdpls/schulze_election_telegram_bot/internal/models"
 
 	"github.com/jackc/pgx/v5"
 )
+
+// ErrAlreadyVerified — делегат уже привязан к другому Telegram-аккаунту
+var ErrAlreadyVerified = errors.New("delegate already verified by another account")
 
 func (vc *VoteChain) AddDelegate(ctx context.Context, delegate models.Delegate) error {
 	tx, err := vc.storage.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
@@ -77,6 +81,10 @@ func (vc *VoteChain) VerificateDelegate(ctx context.Context, delegateID int, tel
 	}
 	if delegate == nil {
 		return fmt.Errorf("chain.UpdateDelegate: delegate not found")
+	}
+	// Повторная привязка перехватила бы уже зарегистрированного делегата (устаревший код с другого аккаунта)
+	if delegate.TelegramID.Valid && delegate.TelegramID.Int64 != telegramId.Int64 {
+		return fmt.Errorf("chain.UpdateDelegate: delegate %d: %w", delegateID, ErrAlreadyVerified)
 	}
 
 	delegate.TelegramID = telegramId
@@ -159,6 +167,9 @@ func (vc *VoteChain) CheckFerification(ctx context.Context, delegateID int) (boo
 	delegate, err := vc.storage.GetDelegateByDelegateID(ctx, tx, delegateID)
 	if err != nil {
 		return false, fmt.Errorf("chain.CheckFerification: %w", err)
+	}
+	if delegate == nil { // нет делегата — нет и верификации
+		return false, nil
 	}
 	if delegate.TelegramID.Valid {
 		return true, nil

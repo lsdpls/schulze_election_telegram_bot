@@ -1,13 +1,13 @@
 package api
 
 import (
-	"context"
 	"encoding/json"
 	"net/http"
 
 	log "github.com/sirupsen/logrus"
 )
 
+// ResultResponse — результаты по курсу: победители и матрицы Шульце (публичны по замыслу)
 type ResultResponse struct {
 	Course            string `json:"course"`
 	WinnerCandidateID []int  `json:"winner_candidate_id"`
@@ -22,9 +22,7 @@ func (h *Handler) GetResults(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx := context.Background()
-
-	results, err := h.voteChain.GetAllResults(ctx)
+	results, err := h.voteChain.GetAllResults(r.Context())
 	if err != nil {
 		log.Errorf("Failed to get results: %v", err)
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
@@ -46,10 +44,5 @@ func (h *Handler) GetResults(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(response); err != nil {
-		log.Errorf("Failed to encode response: %v", err)
-		http.Error(w, "Internal server error", http.StatusInternalServerError)
-		return
-	}
+	writeJSON(w, response)
 }

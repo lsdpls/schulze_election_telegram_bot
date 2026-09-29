@@ -1,13 +1,12 @@
 package api
 
 import (
-	"context"
-	"encoding/json"
 	"net/http"
 
 	log "github.com/sirupsen/logrus"
 )
 
+// CandidateResponse — публичные поля кандидата (без описания и флага допуска)
 type CandidateResponse struct {
 	CandidateID int    `json:"candidate_id"`
 	Name        string `json:"name"`
@@ -20,9 +19,7 @@ func (h *Handler) GetCandidates(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx := context.Background()
-
-	candidates, err := h.voteChain.GetAllCandidates(ctx)
+	candidates, err := h.voteChain.GetAllEligibleCandidates(r.Context()) // недопущенные не публикуются
 	if err != nil {
 		log.Errorf("Failed to get candidates: %v", err)
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
@@ -38,10 +35,5 @@ func (h *Handler) GetCandidates(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(response); err != nil {
-		log.Errorf("Failed to encode response: %v", err)
-		http.Error(w, "Internal server error", http.StatusInternalServerError)
-		return
-	}
+	writeJSON(w, response)
 }

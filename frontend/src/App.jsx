@@ -96,10 +96,8 @@ function App() {
         axios.get('/election_bot/result')
       ]);
       
-      const sortedVotes = votesRes.data.sort((a, b) => 
-        new Date(a.created_at) - new Date(b.created_at)
-      );
-      setVotes(sortedVotes);
+      // порядок сервера (по токену): времени голосования в API нет
+      setVotes(votesRes.data);
       
       const candidatesMap = {};
       candidatesRes.data.forEach(c => {

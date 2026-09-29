@@ -398,41 +398,23 @@ func (vc *VoteChain) CalculateResults(ctx context.Context) (int, error) {
 
 ### 1. Скопируйте репозиторий на свой компьютер;
 ### 2. Установите все необходимые программы и утилиты;
-- Docker;
-- Docker-compose;
+- Docker с плагином Compose v2 (`docker compose`);
+- curl ≥ 7.76;
 - Golang;
 - makefile;
 - goose;
 ### 3. Используйте `go mod tidy` для установки зависимостей;
-### 4. С помощью .env.example создайте файл .env и внесите в него необходимые данные;
-- TELEGRAM_APITOKEN - токен бота в телеграме (создаете получаете у [@BotFather](https://t.me/botfather))
-- POSTGRES_USER - имя пользователя базы данных
-- POSTGRES_PASSWORD - пароль от базы данных
-- POSTGRES_DB - название базы данных
-- NGROK_PORT - порт, на котором будет запущен контейнер bot (по умолчанию 8080)
-- NGROK_URL - ссылка на ngrok (используется для переадресации обновлений от телеграма в контейнер bot)
-- NGROK_AUTHTOKEN - токен для авторизации в ngrok (создаете и получаете на [сайте ngrok](https://dashboard.ngrok.com/))
-- SMTP_EMAIL - почта для отправки уведомлений
-- SMTP_PASSWORD - пароль от почты для отправки уведомлений (создаете и получааете пароль приложения у необходимого хоста почты)
-- ADMIN_CHAT_ID - id чата администратора (id чатов и пользователей можно найти прямо в приложении телеграма)
-- LOG_CHAT_ID - id чата для логирования
-### 5. Пропишите необходимые sql миграции в `migrations/`;
-- Рекомендуется использовать [goose](https://github.com/pressly/goose/) для работы с миграциями;
-### 6. С помощью команды `make app2` запустите проект.
+### 4. Создайте `deploy/.env` по образцу `deploy/.env.example`;
+- назначение переменных описано в комментариях `deploy/.env.example`, порядок деплоя (домен, ngrok, миграции) — в `deploy/README.md`;
+- значения без кавычек и инлайн-комментариев: файл читают make, compose, bash и Go.
+### 5. Миграции goose лежат в `deploy/migrations/` (схема) и `deploy/migrations_dev/` (тестовые данные, только dev);
+- `make migrate` накатывает схему, `make migrate-dev` — тестовые данные; в prod (`make app-prod`) тестовые данные не загружаются.
+### 6. Из каталога `deploy/` командой `make app2` запустите dev-стек.
 ```make
-app2: up-db app migrate ngrok-docker
-    @echo -e "\033[32mAll containers started successfully\033[0m"
-
-up-db:
-	docker-compose up -d postgres
-app:
-	docker-compose up -d bot --build
-migrate:
-	goose -dir ./migrations postgres "postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@localhost:5432/${POSTGRES_DB}?sslmode=disable" up
-ngrok-docker:
-	docker-compose up -d ngrok
+# БД → миграции → тестовые данные → bot → ngrok (сервис ngrok в docker-compose.yml, profile dev)
+app2: up-db migrate migrate-dev app ngrok-docker
 ```
-
+- webhook на адрес ngrok: `make webhook_create`; prod с доменом — `make app-prod` и `deploy/scripts/setup-domain.sh` (см. `deploy/README.md`).
 - Все необходимые контейнеры, миграции и пр. должны запуститься автоматически.
 
 ## Примечание

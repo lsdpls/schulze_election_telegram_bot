@@ -3,22 +3,12 @@ package bot
 import (
 	"context"
 	"fmt"
-	"strconv"
+	"github.com/lsdpls/schulze_election_telegram_bot/internal/config"
 	"github.com/lsdpls/schulze_election_telegram_bot/internal/utils"
+	"strconv"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
-
-var helpText = "Принцип голосования по методу Шульце заключается в формировании ранжированного списка кандидатов, " +
-	"в котором <b>каждый кандидат должен быть ранжирован</b> по отношению к другим.\n" +
-	"Например, если вы считаете, что кандидат А лучше кандидата Б, то вы должны поставить кандидата А выше в списке.\n\n" +
-	"В контексте использования данного бота Вы должны последовательно выбрать кандидатов, от наиболее предпочитаемого к наименее предпочитаемому.\n" +
-	"Для этого используйте кнопки меню в сообщении-бюллетени, последовательно выбирая нужного кандидата.\n\n" +
-	"Важно:\n" +
-	"• Вы должны ранжировать <b>всех кандидатов</b>.\n" +
-	"• Удостоверьтесь, что Ваш бюллетень принят, <b>получив соответствующее сообщение</b>.\n" +
-	"• Вы cможете изменить свой бюллетень ранжирования в любое время до окончания голосования.\n" +
-	"• Не выбирайте следующего кандидата, пока не увидите изменение в теле сообщения-бюллетеня.\n"
 
 // Обработчик команды /vote
 func (b *Bot) handleVote(ctx context.Context, message *tgbotapi.Message) {
@@ -29,22 +19,22 @@ func (b *Bot) handleVote(ctx context.Context, message *tgbotapi.Message) {
 
 	if !isActive {
 		log.Warn(telegramID, " Попытка начать голосование при закрытом голосовании")
-		b.SendMessage(telegramID, "Голосование уже завершилось или еще не началось")
+		b.SendMessage(telegramID, msgVoteClosed)
 		return
 	}
 	// Проверяем, зарегистрирован ли пользователь
 	ok, err := b.voteChain.CheckExistDelegateByTelegramID(ctx, telegramID)
 	if err != nil {
 		log.Errorf("%d Ошибка при начале голосования: %v", telegramID, err)
-		b.SendMessage(telegramID, "Произошла ошибка при проверке регистрации делегата. Пожалуйста, попробуйте снова")
+		b.SendMessage(telegramID, msgSysRegistrationCheckError)
 		return
 	}
 	if !ok {
 		log.Warn(telegramID, " Незарегистрированный пользователь пытается начать голосование")
-		b.SendMessage(telegramID, "Вы не зарегистрированы! Используйте команду /start для регистрации")
+		b.SendMessage(telegramID, msgVoteNotRegistered)
 		return
 	}
-	if err := b.SendMessage(telegramID, helpText); err != nil {
+	if err := b.SendMessage(telegramID, msgVoteHelp); err != nil {
 		log.Errorf("%d Ошибка получения памятки к голосованию: %v", telegramID, err)
 	}
 
@@ -78,7 +68,7 @@ func (b *Bot) sendCandidateKeyboard(_ context.Context, message *tgbotapi.Message
 			continue
 		}
 		button := tgbotapi.NewInlineKeyboardButtonData(
-			fmt.Sprintf("%s, %s", b.Candidates[candidateID].Name, b.Candidates[candidateID].Course), // надпись кнопки
+			fmt.Sprintf(msgVoteButtonFmt, b.Candidates[candidateID].Name, b.Candidates[candidateID].Course), // надпись кнопки
 			strconv.Itoa(candidateID), // данные кнопки
 		)
 		keyboard.InlineKeyboard = append(keyboard.InlineKeyboard, []tgbotapi.InlineKeyboardButton{button})
@@ -92,9 +82,9 @@ func (b *Bot) sendCandidateKeyboard(_ context.Context, message *tgbotapi.Message
 
 	// Отправляем сообщение с клавиатурой
 	if editMsg {
-		msgText := "Выберите всех кандидатов от наиболее к наименее предпочтительному:\n\n"
+		msgText := msgVoteBallotHeader
 		for i, candidateID := range b.rankedList[telegramID] {
-			msgText += fmt.Sprintf("%d. %s\n", i+1, b.Candidates[candidateID].Name)
+			msgText += fmt.Sprintf(msgVoteBallotLineFmt, i+1, b.Candidates[candidateID].Name)
 		}
 		msg := tgbotapi.NewEditMessageTextAndMarkup(
 			message.Chat.ID,
@@ -106,7 +96,7 @@ func (b *Bot) sendCandidateKeyboard(_ context.Context, message *tgbotapi.Message
 			log.Errorf("%d ошибка записи бюллетеня: %v", telegramID, err)
 		}
 	} else {
-		msg := tgbotapi.NewMessage(message.Chat.ID, "Выберите всех кандидатов от наиболее к наименее предпочтительному:\n\n")
+		msg := tgbotapi.NewMessage(message.Chat.ID, msgVoteBallotHeader)
 		msg.ReplyMarkup = keyboard
 		if _, err := b.botAPI.Send(msg); err != nil {
 			log.Errorf("%d ошибка отправки бюллетеня: %v", telegramID, err)
@@ -123,14 +113,14 @@ func (b *Bot) handleCallbackQuery(ctx context.Context, query *tgbotapi.CallbackQ
 
 	if !isActive {
 		log.Warn(telegramID, " Попытка голосования при закрытом голосовании")
-		b.SendMessage(telegramID, "Голосование уже завершилось или еще не началось")
+		b.SendMessage(telegramID, msgVoteClosed)
 		return
 	}
 	// Извлекаем ID кандидата из данных кнопки
 	candidateID, err := strconv.Atoi(query.Data)
 	if err != nil {
 		log.Errorf("%d Ошибка при обработке кнопки: %v", telegramID, err)
-		b.SendMessage(telegramID, "Произошла ошибка при обработке кнопки. Пожалуйста, попробуйте снова")
+		b.SendMessage(telegramID, msgSysCallbackError)
 		return
 	}
 	// TODO Вариант порчи бюллетеня получше того, что есть. Портит бюллетень одиножды при повторе
@@ -151,7 +141,9 @@ func (b *Bot) handleCallbackQuery(ctx context.Context, query *tgbotapi.CallbackQ
 	}
 	// Добавляем ID кандидата в список ранжирования
 	b.rankedList[telegramID] = append(b.rankedList[telegramID], candidateID)
-	b.botAPI.Send(tgbotapi.NewCallback(query.ID, "Кандидат учтен"))
+	if _, err := b.botAPI.Request(tgbotapi.NewCallback(query.ID, msgVoteCallbackAccepted)); err != nil {
+		log.Errorf("%d ошибка ответа на нажатие кнопки: %v", telegramID, err)
+	}
 
 	// Проверяем, все ли кандидаты ранжированы
 	if len(b.rankedList[telegramID]) == len(b.Candidates) {
@@ -180,9 +172,9 @@ func (b *Bot) sendRankedList(ctx context.Context, query *tgbotapi.CallbackQuery)
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 	// Отправляем бюллетень и удаляем клавиатуру
-	msgText := "Ваш итоговый бюллетень:\n\n"
+	msgText := msgVoteFinalBallotHeader
 	for i, candidateID := range b.rankedList[telegramID] {
-		msgText += fmt.Sprintf("%d. %s\n", i+1, b.Candidates[candidateID].Name)
+		msgText += fmt.Sprintf(msgVoteBallotLineFmt, i+1, b.Candidates[candidateID].Name)
 	}
 	editMsg := tgbotapi.NewEditMessageText(telegramID, query.Message.MessageID, msgText)
 	if _, err := b.botAPI.Send(editMsg); err != nil {
@@ -193,7 +185,7 @@ func (b *Bot) sendRankedList(ctx context.Context, query *tgbotapi.CallbackQuery)
 	err := b.voteChain.AddVote(ctx, telegramID, b.rankedList[telegramID])
 	if err != nil {
 		log.Errorf("%d ошибка регистрации голоса: %v", telegramID, err)
-		b.SendMessage(telegramID, "Произошла ошибка при регистрации голоса. Пожалуйста, попробуйте снова")
+		b.SendMessage(telegramID, msgSysVoteSaveError)
 		return
 	}
 
@@ -201,9 +193,10 @@ func (b *Bot) sendRankedList(ctx context.Context, query *tgbotapi.CallbackQuery)
 	voteToken := utils.GenerateVoteToken(telegramID)
 
 	// Уведомляем, что голос учтен
-	successMessage := "<b>Ваш бюллетень принят✅</b>\n\n" +
-		"Вы можете изменить свой бюллетень до окончания голосования, проголосовав заново, отправив для этого команду /vote\n\n" +
-		"🔑 <code>" + voteToken + "</code>"
+	successMessage := fmt.Sprintf(msgVoteAcceptedFmt, voteToken)
+	if config.Domain != "" {
+		successMessage += fmt.Sprintf(msgVoteBallotPageFmt, config.Domain)
+	}
 
 	if err := b.SendMessage(telegramID, successMessage); err != nil {
 		log.Errorf("%d ошибка ответа о принятии бюллетеня: %v", telegramID, err)
@@ -213,7 +206,7 @@ func (b *Bot) sendRankedList(ctx context.Context, query *tgbotapi.CallbackQuery)
 
 // Порча бюллетеня
 func (b *Bot) spoilBallot(telegramID int64, message *tgbotapi.Message) {
-	spoiledTxt := fmt.Sprintf("%s\n\n❌Бюллетень испорчен❌", message.Text)
+	spoiledTxt := fmt.Sprintf(msgVoteSpoiledFmt, message.Text)
 	spoiledMsg := tgbotapi.NewEditMessageText(
 		telegramID,
 		message.MessageID,
@@ -222,7 +215,7 @@ func (b *Bot) spoilBallot(telegramID int64, message *tgbotapi.Message) {
 	if _, err := b.botAPI.Send(spoiledMsg); err != nil {
 		log.Errorf("%d ошибка при попытке запретить испорченный бюллетень: %v", telegramID, err)
 	}
-	b.SendMessage(telegramID, "Пожалуйста, не используйте несколько бюллетеней одновременно. Используйте команду /vote для получения нового бюллетеня.")
+	b.SendMessage(telegramID, msgVoteSpoiledHint)
 }
 
 // Проверка уникальности кандидатов в списке

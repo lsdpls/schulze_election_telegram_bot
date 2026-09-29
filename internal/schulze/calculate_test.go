@@ -1,9 +1,9 @@
 package schulze
 
 import (
+	"github.com/lsdpls/schulze_election_telegram_bot/internal/models"
 	"reflect"
 	"testing"
-	"github.com/lsdpls/schulze_election_telegram_bot/internal/models"
 
 	"github.com/stretchr/testify/assert"
 )

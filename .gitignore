@@ -9,6 +9,12 @@ logs/
 *.test
 *.out
 *.env
+.env
+.env.*
+!.env.example
+
+*.md
+!README.md
 .vscode/
 certs
 postgres_data/

@@ -19,12 +19,12 @@
 **Schulze Election Telegram Bot** — это система для проведения электронного голосования среди студентов с использованием метода Шульце. Система построена на трехслойной архитектуре и использует PostgreSQL для хранения данных.
 
 ### Технологический стек
-- **Язык**: Go 1.23.4
+- **Язык**: Go 1.27
 - **База данных**: PostgreSQL 15.1
 - **Telegram API**: go-telegram-bot-api/v5
 - **Миграции**: goose
 - **Контейнеризация**: Docker, Docker Compose
-- **Туннелирование**: ngrok (для получения webhook от Telegram)
+- **Webhook**: домен + nginx (prod) или ngrok (dev, profile `dev` в docker-compose.yml)
 
 ### Основные возможности
 1. **Регистрация делегатов** через email верификацию
@@ -147,7 +147,7 @@ type Vote struct {
 ```go
 type Result struct {
     ID                int                 // Уникальный ID
-    Course            string              // Курс ("1 бакалавриат", "Global Top" и т.д.)
+    Course            string              // Курс ("1 бакалавриат", "Общие места" и т.д.)
     WinnerCandidateID []int               // Массив победителей (в случае ничьи > 1)
     Preferences       map[int]map[int]int // Матрица парных предпочтений
     StrongestPaths    map[int]map[int]int // Матрица сильнейших путей Шульце
@@ -1103,7 +1103,7 @@ func (s *Schulze) ComputeGlobalTop(ctx context.Context) error
 3. Подсчитать парные предпочтения и пути
 4. Найти потенциальных победителей
 5. Построить строгий порядок (`buildStrictOrder`)
-6. Сохранить результат с Course = "Global Top"
+6. Сохранить результат с Course = "Общие места"
 
 ```go
 func (s *Schulze) excludeCourseWinners(ctx, allCandidates, allVotes) ([]Candidate, []Vote, int, error)
@@ -1252,16 +1252,8 @@ func SendVerificationCodeToEmailWithContext(ctx context.Context, email string, c
 1. Валидация email (`validateEmail`)
 2. Валидация кода (`validateVerificationCode`)
 3. Получение credentials из env: `SMTP_EMAIL`, `SMTP_PASSWORD`
-4. Создание соединения с smtp.mail.ru:2525 с таймаутом
-5. Установка TLS (STARTTLS):
-   ```go
-   tlsconfig := &tls.Config{
-       InsecureSkipVerify: false,
-       ServerName:         smtpHost,
-       MinVersion:         tls.VersionTLS12,
-   }
-   conn.StartTLS(tlsconfig)
-   ```
+4. Транспорт: host/port/режим из `SMTP_HOST`/`SMTP_PORT`/`SMTP_TLS` (по умолчанию smtp.mail.ru:465, implicit TLS; 25/587/2525 — STARTTLS) либо HTTPS-API Yandex Cloud Postbox при `EMAIL_PROVIDER=postbox`
+5. TLS: `tls.Config{ServerName: smtpHost, MinVersion: tls.VersionTLS12}` — implicit TLS на 465 или `StartTLS` для остальных портов
 6. Аутентификация через `smtp.PlainAuth`
 7. Отправка письма с MIME заголовками:
    ```
@@ -1389,6 +1381,14 @@ func (l *Logger) SetLevel(level string) error
 
 ---
 
+### API Module (`internal/api/`)
+
+**Назначение**: JSON для веб-страницы бюллетеней (`frontend/`, отдаётся nginx по `/votes/`): `GET /votes` (бюллетени: HMAC-токен делегата и ранжирование, отсортированы по токену; времени голосования и ID делегата нет — по ним бюллетень сопоставлялся бы с записью «Голос учтен» в лог-чате), `GET /candidates` (`candidate_id`, `name`, `course`), `GET /result` (курс, ID победителей, матрицы, `stage`). Все ответы с `Cache-Control: no-store`, не-GET → 405, контекст запроса — `r.Context()`. Регистрируются в `cmd/main.go` на том же порту, что и webhook, перед catch-all `/`. Тесты: `internal/api/api_test.go` (ручная заглушка `voteChain`).
+
+**Доступ снаружи**: `deploy/nginx/nginx.conf` проксирует `/election_bot/{votes,candidates,result}` на бота только для запросов со своей страницы (`Sec-Fetch-Site: same-origin` или `Referer` с `https://DOMAIN/`), иначе 403; `limit_req` 5 r/s с IP (burst 20). Это отсекает curl и чужие сайты, но заголовки подделываются, поэтому данные в API обезличены по построению.
+
+---
+
 ## Флоу работы системы
 
 ### 1. Запуск приложения
@@ -1396,7 +1396,7 @@ func (l *Logger) SetLevel(level string) error
 **Файл**: `cmd/main.go`
 
 ```
-1. Читается DATABASE_URL из env
+1. config.LoadConfig читает и валидирует env (DSN собирается из POSTGRES_*)
    ↓
 2. Создается Storage (db.NewStorage)
    ├─ Создается пул соединений pgxpool
@@ -1450,8 +1450,9 @@ Bot: handleEmailInput
    ├─ Проверка верификации (CheckFerification)
    ├─ Генерация кода: 473829
    ├─ Отправка email (SendVerificationCodeToEmail)
-   │  ├─ TCP connect → smtp.mail.ru:2525
-   │  ├─ STARTTLS
+   │  ├─ SMTP: host/port/режим из SMTP_HOST/SMTP_PORT/SMTP_TLS
+   │  │  (по умолчанию smtp.mail.ru:465, implicit TLS; 25/587/2525 — STARTTLS)
+   │  │  либо HTTPS-API Yandex Cloud Postbox при EMAIL_PROVIDER=postbox
    │  ├─ Аутентификация
    │  └─ Отправка письма
    ├─ Сохранение: codeStore[telegramID] = 473829
@@ -1613,7 +1614,7 @@ Bot: handleResults
    ├─ computeStrongestPaths
    ├─ findPotentialWinners
    ├─ buildStrictOrder (линейный порядок с учетом ничьих)
-   └─ AddResult(Course: "Global Top")
+   └─ AddResult(Course: "Общие места")
    ↓
 7. bot.handleCSV
    ├─ schulze.SaveResultsToCSV
@@ -1791,49 +1792,95 @@ Bot хранит временное состояние:
 
 ## Конфигурация и переменные окружения
 
+Загружаются в `internal/config/config.go` (`LoadConfig`), файл — `deploy/.env` (пример: `deploy/.env.example`). Значения без кавычек: файл читают make, docker compose, bash и Go.
+
 ### Обязательные переменные
 
 ```env
 # Telegram
 TELEGRAM_APITOKEN=...         # Токен бота от BotFather
+ADMIN_CHAT_ID=...             # Чат администраторов (любой участник = админ), не 0
+WEBHOOK_SECRET=...            # secret_token для setWebhook: 32..256 символов A-Za-z0-9_-
 
-# Database
-DATABASE_URL=postgres://...   # DSN PostgreSQL
+# Database (DSN собирается кодом через url.URL, DATABASE_URL не читается)
+POSTGRES_HOST=postgres        # Имя сервиса в docker-compose.yml
+POSTGRES_PORT=5432
+POSTGRES_USER=...
+POSTGRES_PASSWORD=...
+POSTGRES_DB=...
+POSTGRES_SSLMODE=disable
 
-# SMTP (Email)
-SMTP_EMAIL=...                # Логин mail.ru
-SMTP_PASSWORD=...             # Пароль приложения
+# Email
+SMTP_EMAIL=...                # Адрес отправителя (для обоих провайдеров), голый адрес без имени
+SMTP_PASSWORD=...             # Обязателен при EMAIL_PROVIDER=smtp
+POSTBOX_KEY_ID=...            # Обязательны при EMAIL_PROVIDER=postbox
+POSTBOX_SECRET_KEY=...
 
-# Admin
-ADMIN_CHAT_ID=...             # Telegram ID администратора
-LOG_CHAT_ID=...               # Telegram ID чата для логов
+# App
+APP_PORT=8080                 # Порт HTTP-сервера бота (1..65535)
+VOTE_TOKEN_SECRET=...         # HMAC-ключ токенов бюллетеней, минимум 32 символа
+TOTAL_PLACES=...              # Число мест в совете (> 0)
 ```
 
+### Необязательные переменные
+
+```env
+LOG_CHAT_ID=...               # Telegram-чат для логов (без него — только stdout и файл)
+EMAIL_PROVIDER=smtp           # smtp (по умолчанию) | postbox (HTTPS-API Yandex Cloud Postbox)
+EMAIL_DAILY_LIMIT=180         # Потолок писем в сутки (квота Postbox — 200)
+SMTP_HOST=smtp.mail.ru
+SMTP_PORT=465                 # 465 → SMTP_TLS=tls; 25/587/2525 → SMTP_TLS=starttls
+SMTP_TLS=tls                  # tls (implicit TLS) | starttls
+SMTP_USER=...                 # Логин, если не равен SMTP_EMAIL (релеи)
+POSTBOX_ENDPOINT=https://postbox.cloud.yandex.net   # Только https://host, без пути
+POSTBOX_REGION=ru-central1
+LOG_LEVEL=info                # Уровень logrus; debug пишет коды подтверждения и бюллетени
+TELEGRAM_LOG_LEVEL=info       # Уровень записей, отправляемых в LOG_CHAT_ID
+```
+
+Только для деплоя (кодом не читаются): `DOMAIN`, `EMAIL` (контакт Let's Encrypt), `DROP_PENDING` (drop_pending_updates при setWebhook), `NGROK_*`.
+
 ### Docker Compose
+
+`deploy/docker-compose.yml` (production, контекст сборки — корень репозитория):
 
 ```yaml
 services:
   postgres:
     image: postgres:15.1
-    ports: ["5432:5432"]
+    ports: ["127.0.0.1:5432:5432"]   # только для goose с хоста
     volumes: [./postgres_data:/var/lib/postgresql/data]
-  
+    healthcheck: {test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]}
+    restart: unless-stopped
+
+  nginx:
+    image: nginx:alpine
+    ports: ["80:80", "443:443"]
+    volumes: [./nginx/nginx.conf:/etc/nginx/templates/default.conf.template, /etc/letsencrypt:/etc/letsencrypt]
+    environment: {DOMAIN: ${DOMAIN}, APP_PORT: ${APP_PORT}}
+    depends_on: [bot, frontend]         # upstream-имена резолвятся при старте nginx
+
   bot:
-    build: .
-    ports: ["8080:8080"]
-    environment:
-      - TELEGRAM_APITOKEN
-      - DATABASE_URL
-      - SMTP_EMAIL
-      - SMTP_PASSWORD
-    depends_on: [postgres]
-  
-  ngrok:
+    build: {context: .., dockerfile: deploy/dockerfile}
+    expose: ["${APP_PORT}"]
+    env_file: [.env]
+    depends_on: {postgres: {condition: service_healthy}}
+
+  frontend:                           # CRA (homepage /votes) + serve -s; nginx: /votes/ → frontend:7070/
+    build: {context: ../frontend, dockerfile: Dockerfile}
+    expose: ["7070"]
+
+  ngrok:                              # dev: make ngrok-docker (docker compose --profile dev up -d ngrok)
     image: ngrok/ngrok
-    command: http --url=${NGROK_URL} bot:8080
-    environment: [NGROK_AUTHTOKEN]
-    depends_on: [bot]
+    profiles: ["dev"]
+    command: http --url=${NGROK_URL} bot:${APP_PORT}
 ```
+
+Миграции goose: `deploy/migrations/` (схема, `make migrate`), `deploy/migrations_dev/` (тестовые данные, только dev: `make migrate-dev`).
+
+Webhook: Telegram → `https://DOMAIN/election_bot/` → nginx → `bot:APP_PORT/`. Установка — `make webhook-prod` или `deploy/scripts/setup-domain.sh`.
+
+Страница: `https://DOMAIN/votes` → nginx (префикс `/votes/` срезается) → `frontend:7070`; её запросы `/election_bot/{votes,candidates,result}` → `bot:APP_PORT/{votes,candidates,result}` (только со страницы, см. API Module).
 
 ---
 

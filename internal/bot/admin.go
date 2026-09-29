@@ -3,6 +3,7 @@ package bot
 import (
 	"context"
 	"fmt"
+	"html"
 	"io"
 	"os"
 	"path/filepath"
@@ -18,25 +19,10 @@ import (
 // Обработчик команды /help
 func (b *Bot) handleHelpAdmin(_ context.Context, message *tgbotapi.Message) {
 	chatID := message.Chat.ID
-	msg := tgbotapi.NewMessage(chatID, "Список доступных команд:\n"+
-		"/add_delegate <delegate_id> <name> <group> - добавить делегата\n"+
-		"/delete_delegate <delegate_id> - удалить делегата\n"+
-		"/add_candidate <candidate_id> <name> <course> <description> - добавить кандидата\n"+
-		"/ban_candidate <candidate_id> - заблокировать кандидата\n"+
-		"/delete_candidate <candidate_id> - удалить кандидата\n"+
-		"/show_delegates - показать список делегатов\n"+
-		"/show_candidates - показать список кандидатов\n"+
-		"/show_votes - показать список голосов\n"+
-		"/start_voting - начать голосование\n"+
-		"/stop_voting - остановить голосование\n"+
-		"/results - вычислить результаты голосования\n"+
-		"/print - вывести результаты голосования\n"+
-		"/csv - сохранить результаты в CSV файл\n"+
-		"/log <level> - установить уровень логирования (Debug, Info, Warn, Error)\n"+
-		"/send_logs - отправить файл логов\n"+
-		"/help - показать список доступных команд\n"+
-		"\nВсегда используйте запятые между аргументами команды, если идет перечисление аргументов")
-	b.botAPI.Send(msg)
+	msg := tgbotapi.NewMessage(chatID, msgAdminHelp)
+	if _, err := b.botAPI.Send(msg); err != nil {
+		log.Errorf("%d Ошибка отправки списка: %v", chatID, err)
+	}
 }
 
 // Обработчик команды /add_delegate
@@ -194,25 +180,27 @@ func (b *Bot) handleShowDelegates(ctx context.Context, message *tgbotapi.Message
 		return
 	}
 
-	msgText := "Список делегатов:\n"
+	msgText := msgAdminDelegatesHeader
 	for _, delegate := range delegates {
-		voteStatus := "❌" // Default to cross (not voted)
+		voteStatus := msgAdminMarkNo // Default to cross (not voted)
 		if delegate.HasVoted {
-			voteStatus = "✅" // Change to checkmark if voted
+			voteStatus = msgAdminMarkYes // Change to checkmark if voted
 		}
-		registry := "❌"
+		registry := msgAdminMarkNo
 		if delegate.TelegramID.Valid {
-			registry = "✅"
+			registry = msgAdminMarkYes
 		}
 		telegramIDStr := toStrTelegramID(strconv.Itoa(int(delegate.TelegramID.Int64)))
 		delegateIDStr := toStrDelegatID(strconv.Itoa(delegate.DelegateID))
-		delegateInfo := fmt.Sprintf("• <a href=\"tg://user?id=%s\">st%s</a>, %s, Registry%s, Vote%s\n", telegramIDStr, delegateIDStr, delegate.Group, registry, voteStatus)
+		delegateInfo := fmt.Sprintf(msgAdminDelegateLineFmt, telegramIDStr, delegateIDStr, html.EscapeString(delegate.Group), registry, voteStatus)
 		// Check if adding the delegate info exceeds the limit
 		if len(msgText)+len(delegateInfo) > 4096 {
 			// Send the current message
 			msg := tgbotapi.NewMessage(chatID, msgText)
 			msg.ParseMode = "HTML"
-			b.botAPI.Send(msg)
+			if _, err := b.botAPI.Send(msg); err != nil {
+				log.Errorf("%d Ошибка отправки списка: %v", chatID, err)
+			}
 
 			// Reset the message text for the next message
 			msgText = delegateInfo
@@ -225,7 +213,9 @@ func (b *Bot) handleShowDelegates(ctx context.Context, message *tgbotapi.Message
 	if len(msgText) > 0 {
 		msg := tgbotapi.NewMessage(chatID, msgText)
 		msg.ParseMode = "HTML"
-		b.botAPI.Send(msg)
+		if _, err := b.botAPI.Send(msg); err != nil {
+			log.Errorf("%d Ошибка отправки списка: %v", chatID, err)
+		}
 	}
 
 }
@@ -239,20 +229,22 @@ func (b *Bot) handleShowCandidates(ctx context.Context, message *tgbotapi.Messag
 		return
 	}
 
-	msgText := "Список кандидатов:\n"
+	msgText := msgAdminCandidatesHeader
 	for _, candidate := range candidates {
-		eligibleStatus := "❌" // Default to cross (not eligible)
+		eligibleStatus := msgAdminMarkNo // Default to cross (not eligible)
 		if candidate.IsEligible {
-			eligibleStatus = "✅" // Change to checkmark if eligible
+			eligibleStatus = msgAdminMarkYes // Change to checkmark if eligible
 		}
 		delegateIDStr := toStrDelegatID(strconv.Itoa(candidate.CandidateID))
-		candidateInfo := fmt.Sprintf("• %s, st%s, %s, %s, Eligible %s\n", candidate.Name, delegateIDStr, candidate.Course, candidate.Description, eligibleStatus)
+		candidateInfo := fmt.Sprintf(msgAdminCandidateLineFmt, html.EscapeString(candidate.Name), delegateIDStr, html.EscapeString(candidate.Course), html.EscapeString(candidate.Description), eligibleStatus)
 		// Check if adding the candidate info exceeds the limit
 		if len(msgText)+len(candidateInfo) > 4096 {
 			// Send the current message
 			msg := tgbotapi.NewMessage(chatID, msgText)
 			msg.ParseMode = "HTML"
-			b.botAPI.Send(msg)
+			if _, err := b.botAPI.Send(msg); err != nil {
+				log.Errorf("%d Ошибка отправки списка: %v", chatID, err)
+			}
 
 			// Reset the message text for the next message
 			msgText = candidateInfo
@@ -265,7 +257,9 @@ func (b *Bot) handleShowCandidates(ctx context.Context, message *tgbotapi.Messag
 	if len(msgText) > 0 {
 		msg := tgbotapi.NewMessage(chatID, msgText)
 		msg.ParseMode = "HTML"
-		b.botAPI.Send(msg)
+		if _, err := b.botAPI.Send(msg); err != nil {
+			log.Errorf("%d Ошибка отправки списка: %v", chatID, err)
+		}
 	}
 
 }
@@ -279,24 +273,21 @@ func (b *Bot) handleShowVotes(ctx context.Context, message *tgbotapi.Message) {
 		return
 	}
 
-	msgText := "Список голосов:\n"
+	msgText := msgAdminVotesHeader
 
-	// msg := tgbotapi.NewMessage(chatID, "Список голосов:\n")
 	for _, vote := range votes {
-		delegate, err := b.voteChain.GetDelegateByDelegateID(ctx, vote.DelegateID)
-		if err != nil {
-			log.Errorf("%d Ошибка при получении делегата: %v", chatID, err)
-			return
-		}
-		delegateIDStr := toStrDelegatID(strconv.Itoa(delegate.DelegateID))
-		voteInfo := fmt.Sprintf("• st%s, %s: %s\n", delegateIDStr, vote.CreatedAt.Format("15:04:05"), fmt.Sprint(vote.CandidateRankings))
+		// delegate_id есть в самом голосе; лукап делегата давал nil-deref при гонке с /delete_delegate
+		delegateIDStr := toStrDelegatID(strconv.Itoa(vote.DelegateID))
+		voteInfo := fmt.Sprintf(msgAdminVoteLineFmt, delegateIDStr, vote.CreatedAt.Format("15:04:05"), fmt.Sprint(vote.CandidateRankings))
 
 		// Check if adding the vote info exceeds the limit
 		if len(msgText)+len(voteInfo) > 4096 {
 			// Send the current message
 			msg := tgbotapi.NewMessage(chatID, msgText)
 			msg.ParseMode = "HTML"
-			b.botAPI.Send(msg)
+			if _, err := b.botAPI.Send(msg); err != nil {
+				log.Errorf("%d Ошибка отправки списка: %v", chatID, err)
+			}
 
 			// Reset the message text for the next message
 			msgText = voteInfo
@@ -309,7 +300,9 @@ func (b *Bot) handleShowVotes(ctx context.Context, message *tgbotapi.Message) {
 	if len(msgText) > 0 {
 		msg := tgbotapi.NewMessage(chatID, msgText)
 		msg.ParseMode = "HTML"
-		b.botAPI.Send(msg)
+		if _, err := b.botAPI.Send(msg); err != nil {
+			log.Errorf("%d Ошибка отправки списка: %v", chatID, err)
+		}
 	}
 
 }
@@ -437,7 +430,9 @@ func (b *Bot) handlePrint(_ context.Context, message *tgbotapi.Message) {
 	for _, msgPart := range msgParts {
 		msg := tgbotapi.NewMessage(message.Chat.ID, msgPart)
 		msg.ParseMode = "HTML"
-		b.botAPI.Send(msg)
+		if _, err := b.botAPI.Send(msg); err != nil {
+			log.Errorf("%d Ошибка отправки списка: %v", message.Chat.ID, err)
+		}
 	}
 }
 

@@ -3,6 +3,7 @@ package schulze
 import (
 	"context"
 	"fmt"
+	"html"
 	"regexp"
 	"slices"
 	"strings"
@@ -35,7 +36,11 @@ func (s *Schulze) GetResultsString() (string, error) {
 			if err != nil {
 				return "", fmt.Errorf("failed to get winner name: %w", err)
 			}
-			builder.WriteString(fmt.Sprintf(" st%s %s;", idtos(winnerID), winnerName.Name))
+			name := "(кандидат удалён)" // GetCandidateByCandidateID возвращает nil, если кандидата уже нет
+			if winnerName != nil {
+				name = html.EscapeString(winnerName.Name)
+			}
+			builder.WriteString(fmt.Sprintf(" st%s %s;", idtos(winnerID), name))
 		}
 		builder.WriteString("</b>\n")
 		builder.WriteString(s.preferencesToString(result.Preferences, candidateOrder))

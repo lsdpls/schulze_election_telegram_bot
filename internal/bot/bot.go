@@ -2,9 +2,11 @@ package bot
 
 import (
 	"context"
+	"crypto/subtle"
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"html"
 	"net/http"
 	"sort"
 	"sync"
@@ -16,6 +18,9 @@ import (
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
+
+// Заголовок, в котором Telegram передаёт secret_token из setWebhook
+const secretHeader = "X-Telegram-Bot-Api-Secret-Token"
 
 // Возможные состояния пользователя
 const (
@@ -41,6 +46,15 @@ type Bot struct {
 	rankedList          map[int64][]int // Хранение незаполненных бюллетеней
 	candidatesList      string          // Список кандидатов для отправки пользователям
 	activeVoting        bool            // Флаг активного голосования
+
+	// Антиспам писем с кодом (см. reserveCodeSend), всё под b.mu
+	lastCodeByTG       map[int64]time.Time // последняя отправка кода по telegramID
+	lastCodeByDelegate map[int]time.Time   // последняя отправка кода по delegateID
+	emailsDay          string              // сутки счётчиков, YYYY-MM-DD UTC; при смене суток счётчики ниже обнуляются
+	emailsSent         int                 // писем за emailsDay
+	codesByTGDay       map[int64]int       // кодов за emailsDay по telegramID
+	codesByDelegateDay map[int]int         // кодов за emailsDay по delegateID
+	codeAttempts       map[int64]int       // неверных вводов кода подряд по telegramID
 }
 
 // NewBot создает новый экземпляр бота
@@ -57,6 +71,12 @@ func NewBot(botAPI *tgbotapi.BotAPI, voteChain voteChain, schulze schulze) *Bot 
 		Candidates:     make(map[int]models.Candidate),
 		candidatesList: "",
 		activeVoting:   false,
+
+		lastCodeByTG:       make(map[int64]time.Time),
+		lastCodeByDelegate: make(map[int]time.Time),
+		codesByTGDay:       make(map[int64]int),
+		codesByDelegateDay: make(map[int]int),
+		codeAttempts:       make(map[int64]int),
 	}
 }
 
@@ -122,27 +142,59 @@ func (b *Bot) SetCandidates() error {
 	}
 	sort.Ints(b.sortedCandidatesIDs)
 
-	b.candidatesList = "Cписок кандидатов:\n\n"
+	b.candidatesList = msgVoteCandidatesHeader
 	for _, k := range b.sortedCandidatesIDs {
-		b.candidatesList += fmt.Sprintf("• %s, %s\n", b.Candidates[k].Name, b.Candidates[k].Course)
+		b.candidatesList += fmt.Sprintf(msgVoteCandidateLineFmt, html.EscapeString(b.Candidates[k].Name), html.EscapeString(b.Candidates[k].Course))
 	}
 
 	return nil
 }
 
-// HandleWebhook обрабатывает вебхуки от Telegram
+// logWebhookReject логирует каждый отказ (файл и лог-чат); значение секрета в лог не попадает
+func logWebhookReject(r *http.Request, status int, hasSecret bool) {
+	log.Warnf("webhook rejected: method=%s status=%d remote=%s x_forwarded_for=%q x_real_ip=%q secret_header=%t",
+		r.Method, status, r.RemoteAddr, r.Header.Get("X-Forwarded-For"), r.Header.Get("X-Real-IP"), hasSecret)
+}
+
+// HandleWebhook обрабатывает вебхуки от Telegram; запросы без верного secret_token отвергаются.
 func (b *Bot) HandleWebhook(w http.ResponseWriter, r *http.Request) {
+	got := r.Header.Get(secretHeader)
+	if r.Method != http.MethodPost {
+		logWebhookReject(r, http.StatusMethodNotAllowed, got != "")
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	// Без настроенного секрета закрываемся: пустой заголовок не должен совпадать с пустой настройкой
+	if config.WebhookSecret == "" {
+		logWebhookReject(r, http.StatusServiceUnavailable, got != "")
+		http.Error(w, "webhook secret not configured", http.StatusServiceUnavailable)
+		return
+	}
+	if got == "" || subtle.ConstantTimeCompare([]byte(got), []byte(config.WebhookSecret)) != 1 {
+		logWebhookReject(r, http.StatusForbidden, got != "")
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+
 	// Создаем контекст с таймаутом для обработки запроса
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
 
+	// Битое или слишком большое (> 1 MiB) тело отбрасываем с 200: на не-2xx Telegram повторяет update бесконечно и блокирует очередь
 	var update tgbotapi.Update
-	if err := json.NewDecoder(r.Body).Decode(&update); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&update); err != nil {
 		log.Errorf("Error decoding update: %v", err)
-		http.Error(w, "Error decoding update", http.StatusBadRequest)
+		w.WriteHeader(http.StatusOK)
 		return
 	}
 
+	// Паника обработчика не должна оставлять запрос без 200: иначе Telegram повторяет тот же update и блокирует очередь
+	defer func() {
+		if r := recover(); r != nil {
+			log.Errorf("panic при обработке update %d: %v", update.UpdateID, r)
+			w.WriteHeader(http.StatusOK)
+		}
+	}()
 	if update.Message != nil || update.CallbackQuery != nil {
 		b.HandleUpdate(ctx, update) // TODO добавить выход по таймауту
 	}
@@ -150,16 +202,32 @@ func (b *Bot) HandleWebhook(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
-// HandleUpdate обрабатывает обновления от Telegram
+// HandleUpdate обрабатывает обновления от Telegram; неполные объекты игнорируются
 func (b *Bot) HandleUpdate(ctx context.Context, update tgbotapi.Update) {
-	if update.Message != nil {
+	switch {
+	case update.Message != nil:
+		if update.Message.Chat == nil {
+			return
+		}
+		// Группа стала супергруппой: chat_id сменился, ADMIN_CHAT_ID/LOG_CHAT_ID в .env устарели
+		if m := update.Message; m.MigrateToChatID != 0 && (m.Chat.ID == config.AdminChatID || m.Chat.ID == config.LogChatID) {
+			log.Errorf("чат %d мигрировал в %d: обновите ADMIN_CHAT_ID/LOG_CHAT_ID в .env и перезапустите бота", m.Chat.ID, m.MigrateToChatID)
+		}
 		if update.Message.IsCommand() {
 			b.handleCommand(ctx, update.Message)
 		} else {
 			b.handleText(ctx, update.Message)
 		}
-	} else if update.CallbackQuery != nil {
-		b.handleCallbackQuery(ctx, update.CallbackQuery)
+	case update.CallbackQuery != nil:
+		query := update.CallbackQuery
+		// handleCallbackQuery разыменовывает From и Message; паника там оставила бы b.mu захваченным навсегда
+		if query.From == nil || query.Message == nil {
+			if b.botAPI != nil {
+				b.botAPI.Request(tgbotapi.NewCallback(query.ID, ""))
+			}
+			return
+		}
+		b.handleCallbackQuery(ctx, query)
 	}
 }
 
@@ -186,6 +254,8 @@ func (b *Bot) handleCommand(ctx context.Context, message *tgbotapi.Message) {
 			b.handleShowCandidates(ctx, message)
 		case "show_votes":
 			b.handleShowVotes(ctx, message)
+		case "show_code":
+			b.handleShowCode(ctx, message)
 		// Управление голосованием
 		case "start_voting":
 			b.handleStartVoting(ctx, message)
@@ -206,7 +276,7 @@ func (b *Bot) handleCommand(ctx context.Context, message *tgbotapi.Message) {
 		case "help":
 			b.handleHelpAdmin(ctx, message)
 		default:
-			msg := tgbotapi.NewMessage(message.Chat.ID, "Неизвестная Администрирующая команда")
+			msg := tgbotapi.NewMessage(message.Chat.ID, msgAdminUnknownCommand)
 			b.botAPI.Send(msg)
 		}
 		return
@@ -223,13 +293,17 @@ func (b *Bot) handleCommand(ctx context.Context, message *tgbotapi.Message) {
 	case "help":
 		b.handleHelp(ctx, message)
 	default:
-		msg := tgbotapi.NewMessage(message.Chat.ID, "Неизвестная команда")
+		msg := tgbotapi.NewMessage(message.Chat.ID, msgCmdUnknown)
 		b.botAPI.Send(msg)
 	}
 }
 
 // HandleText обрабатывает текстовые сообщения пользователя
 func (b *Bot) handleText(ctx context.Context, message *tgbotapi.Message) {
+	// текст ждём только в личке; в группах сюда приходят служебные сообщения и реплаи
+	if !message.Chat.IsPrivate() {
+		return
+	}
 	b.mu.RLock()
 	state := b.userStates[message.Chat.ID]
 	b.mu.RUnlock()
@@ -240,17 +314,14 @@ func (b *Bot) handleText(ctx context.Context, message *tgbotapi.Message) {
 	case StateWaitingForCode:
 		b.handleCodeInput(ctx, message)
 	default:
-		msg := tgbotapi.NewMessage(message.Chat.ID, "Используйте /start для регистрации и /vote для голосования")
+		msg := tgbotapi.NewMessage(message.Chat.ID, msgCmdDefaultHint)
 		b.botAPI.Send(msg)
 	}
 }
 
 // Подсказка по командам
 func (b *Bot) handleHelp(_ context.Context, message *tgbotapi.Message) {
-	msg := tgbotapi.NewMessage(message.Chat.ID, "Список доступных команд:\n"+
-		"/start - начать регистрацию\n"+
-		"/vote - начать голосование\n"+
-		"/help - показать список доступных команд")
+	msg := tgbotapi.NewMessage(message.Chat.ID, msgCmdHelp)
 	b.botAPI.Send(msg)
 }
 

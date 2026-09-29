@@ -1,5 +1,21 @@
-.env
-.env.example
+# контекст сборки — корень репо (deploy/docker-compose.yml: context ..)
+.git
+.claude
+**/.env
+**/.env.*
+**/*.env
 *.example
+**/*.example
 Makefile
-logs
+**/[Mm]akefile
+**/logs
+**/postgres_data
+**/mocks
+**/certs
+**/*.pem
+**/*.key
+**/*.csv
+# у фронтенда свой контекст сборки (../frontend в docker-compose.yml), в образ бота он не нужен
+frontend
+*.md
+**/*.md
