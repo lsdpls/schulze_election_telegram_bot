@@ -55,6 +55,14 @@ func (b *Bot) handleStart(ctx context.Context, message *tgbotapi.Message) {
 		return
 	}
 
+	// Код уже ждёт ввода (повторный /start после письма): остаёмся в ожидании кода, а не просим почту заново.
+	// Другую почту в этом состоянии ввести можно: handleCodeInput передаёт её в handleEmailInput
+	if delegateID, ok := b.resumePendingCode(message.Chat.ID); ok {
+		log.Debugf("%d Повторный /start при ожидающем коде st%06d", message.Chat.ID, delegateID)
+		b.SendMessage(message.Chat.ID, fmt.Sprintf(msgRegStartCodePendingFmt, delegateID))
+		return
+	}
+
 	// Отправляем приветственное сообщение
 	b.SendMessage(message.Chat.ID, msgRegWelcome)
 
@@ -64,9 +72,20 @@ func (b *Bot) handleStart(ctx context.Context, message *tgbotapi.Message) {
 	b.userStates[message.Chat.ID] = StateWaitingForEmail
 }
 
+// resumePendingCode: если у аккаунта есть ожидающий код, переводит его в ожидание кода и возвращает делегата. Сам берёт b.mu.
+func (b *Bot) resumePendingCode(telegramID int64) (int, bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if _, ok := b.codeStore[telegramID]; !ok {
+		return 0, false
+	}
+	b.userStates[telegramID] = StateWaitingForCode
+	return b.userEmail[telegramID], true
+}
+
 // Обработчик ввода почты
 func (b *Bot) handleEmailInput(ctx context.Context, message *tgbotapi.Message) {
-	email := strings.TrimSpace(message.Text)
+	email := normalizeEmail(strings.TrimSpace(message.Text))
 	telegramID := message.Chat.ID
 
 	// Проверяем формат email
@@ -127,6 +146,8 @@ func (b *Bot) handleEmailInput(ctx context.Context, message *tgbotapi.Message) {
 		b.SendMessage(telegramID, fmt.Sprintf(msgRegCooldownFmt, secs))
 		return
 	case err != nil:
+		// Письмо с действующим кодом на эту почту уже ушло: не отправляем к организаторам, а просим ввести код
+		alreadyEmailed := b.pendingCodeEmailed(telegramID, delegateID)
 		if _, genErr := b.ensurePendingCode(telegramID, delegateID); genErr != nil {
 			log.Errorf("%d Ошибка генерации кода: %v", telegramID, genErr)
 			b.SendMessage(telegramID, msgSysGenericError)
@@ -136,6 +157,10 @@ func (b *Bot) handleEmailInput(ctx context.Context, message *tgbotapi.Message) {
 			log.Warnf("%d Лимит писем на сегодня исчерпан (%d на аккаунт, %d на делегата); код st%06d выдать вручную: /show_code %06d", telegramID, perTGDailyLimit, perDelegateDailyLimit, delegateID, delegateID)
 		} else {
 			log.Errorf("%d Суточный лимит писем (%d) исчерпан, письма не отправляются; коды выдавать вручную: /show_code <delegate_id>", telegramID, config.EmailDailyLimit)
+		}
+		if alreadyEmailed {
+			b.SendMessage(telegramID, fmt.Sprintf(msgRegEmailLimitCodeSentFmt, delegateID))
+			return
 		}
 		b.SendMessage(telegramID, msgRegEmailLimit)
 		return
@@ -157,6 +182,7 @@ func (b *Bot) handleEmailInput(ctx context.Context, message *tgbotapi.Message) {
 		b.SendMessage(telegramID, msgRegEmailSendFailed)
 		return
 	}
+	b.markCodeEmailed(telegramID, delegateID)
 	log.Debugf("%d Код подтверждения %d отправлен на почту", telegramID, code)
 	if err := b.SendMessage(telegramID, msgRegCodeSent); err != nil {
 		log.Errorf("%d Ошибка уведомления об отправке кода: %v", telegramID, err)
@@ -173,6 +199,23 @@ func (b *Bot) switchToPendingCode(telegramID int64, delegateID int) bool {
 	}
 	b.userStates[telegramID] = StateWaitingForCode
 	return true
+}
+
+// pendingCodeEmailed — у аккаунта ждёт ввода код именно для этого делегата, и письмо с ним точно ушло. Сам берёт b.mu.
+func (b *Bot) pendingCodeEmailed(telegramID int64, delegateID int) bool {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	_, ok := b.codeStore[telegramID]
+	return ok && b.userEmail[telegramID] == delegateID && b.codeEmailed[telegramID]
+}
+
+// markCodeEmailed отмечает, что письмо с ожидающим кодом для пары (telegramID, delegateID) ушло. Сам берёт b.mu.
+func (b *Bot) markCodeEmailed(telegramID int64, delegateID int) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if _, ok := b.codeStore[telegramID]; ok && b.userEmail[telegramID] == delegateID {
+		b.codeEmailed[telegramID] = true
+	}
 }
 
 // pendingDelegate — делегат, код для которого ждёт ввода у этого аккаунта. Сам берёт b.mu.
@@ -195,6 +238,7 @@ func (b *Bot) dropPendingCodes(delegateID int, except int64) {
 			delete(b.userEmail, tg)
 			delete(b.userStates, tg)
 			delete(b.codeAttempts, tg)
+			delete(b.codeEmailed, tg)
 		}
 	}
 }
@@ -216,6 +260,7 @@ func (b *Bot) ensurePendingCode(telegramID int64, delegateID int) (int, error) {
 	b.userEmail[telegramID] = delegateID
 	b.userStates[telegramID] = StateWaitingForCode
 	delete(b.codeAttempts, telegramID)
+	delete(b.codeEmailed, telegramID) // новый код ещё никому не отправлен
 	return code, nil
 }
 
@@ -359,7 +404,7 @@ func (b *Bot) handleCodeInput(ctx context.Context, message *tgbotapi.Message) {
 	telegramID := message.Chat.ID
 
 	// Снова прислали почту (хотят письмо заново): обычный путь запроса кода
-	if isValidEmail(strings.TrimSpace(message.Text)) {
+	if isValidEmail(normalizeEmail(strings.TrimSpace(message.Text))) {
 		b.handleEmailInput(ctx, message)
 		return
 	}
@@ -390,6 +435,7 @@ func (b *Bot) handleCodeInput(ctx context.Context, message *tgbotapi.Message) {
 			delete(b.userEmail, telegramID)
 			delete(b.userStates, telegramID)
 			delete(b.codeAttempts, telegramID)
+			delete(b.codeEmailed, telegramID)
 		}
 		b.mu.Unlock()
 		if exhausted {
@@ -422,6 +468,12 @@ func (b *Bot) handleCodeInput(ctx context.Context, message *tgbotapi.Message) {
 
 	// Сбрасываем состояние: своё и ожидающие коды того же делегата у других аккаунтов
 	b.dropPendingCodes(delegateID, 0)
+}
+
+// normalizeEmail приводит ввод почты к виду stXXXXXX: нижний регистр и без домена @student.spbu.ru
+// («St117795», «ST117795@student.spbu.ru» → «st117795»). Пробелы внутри не убираются
+func normalizeEmail(email string) string {
+	return strings.TrimSuffix(strings.ToLower(email), "@student.spbu.ru")
 }
 
 // Проверка формата email

@@ -75,7 +75,11 @@ func (s *Schulze) SaveResultsToCSV(ctx context.Context) error {
 			if err != nil {
 				return fmt.Errorf("failed to get winner name: %w", err)
 			}
-			winners = append(winners, fmt.Sprintf("st%s %s", idtos(winnerID), winnerName.Name))
+			name := "(кандидат удалён)" // GetCandidateByCandidateID возвращает nil, если строки кандидата уже нет
+			if winnerName != nil {
+				name = winnerName.Name
+			}
+			winners = append(winners, fmt.Sprintf("st%s %s", idtos(winnerID), name))
 		}
 		writer.Write(winners)
 

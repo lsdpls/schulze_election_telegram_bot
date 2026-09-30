@@ -19,6 +19,7 @@ func newTestBot() *Bot {
 		codesByTGDay:       make(map[int64]int),
 		codesByDelegateDay: make(map[int]int),
 		codeAttempts:       make(map[int64]int),
+		codeEmailed:        make(map[int64]bool),
 	}
 }
 

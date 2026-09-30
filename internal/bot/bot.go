@@ -9,6 +9,7 @@ import (
 	"html"
 	"net/http"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -21,6 +22,10 @@ import (
 
 // Заголовок, в котором Telegram передаёт secret_token из setWebhook
 const secretHeader = "X-Telegram-Bot-Api-Secret-Token"
+
+// Время на обработку одного апдейта. Отсчитывается после получения блокировки пользователя (HandleUpdate):
+// апдейт, ждавший предыдущий апдейт того же чата, не должен начинать работу с уже истёкшим контекстом
+const updateTimeout = 10 * time.Second
 
 // Возможные состояния пользователя
 const (
@@ -35,7 +40,16 @@ type Bot struct {
 	botAPI    *tgbotapi.BotAPI // Telegram API
 	voteChain voteChain        // цепочка для взаимодействия с базой данных
 	schulze   schulze          // структура для работы с алгоритмом Шульце
-	mu        sync.RWMutex     // Блокировка ресурсов
+	// mu защищает только общие карты и поля ниже; держится лишь на время чтения/записи памяти.
+	// Запросы к Telegram, БД и логи под mu не выполняются
+	mu sync.RWMutex
+
+	// userLocks: ID чата/пользователя -> *sync.Mutex. Апдейты одного пользователя (и одного чата, в том числе
+	// админ-чата) обрабатываются по очереди, разные пользователи — параллельно (см. HandleUpdate)
+	userLocks sync.Map
+	// votingMu делает атомарными открытие/закрытие голосования и изменение состава кандидатов:
+	// проверка «голосование закрыто» и запись в БД не разрываются параллельным /start_voting
+	votingMu sync.Mutex
 
 	// TODO: create user session struct
 	userStates          map[int64]string // Состояния пользователей, где ключ — telegramID, а значение — текущее состояние
@@ -55,6 +69,7 @@ type Bot struct {
 	codesByTGDay       map[int64]int       // кодов за emailsDay по telegramID
 	codesByDelegateDay map[int]int         // кодов за emailsDay по delegateID
 	codeAttempts       map[int64]int       // неверных вводов кода подряд по telegramID
+	codeEmailed        map[int64]bool      // письмо с ожидающим кодом этого telegramID точно ушло (для текста при исчерпанном лимите)
 }
 
 // NewBot создает новый экземпляр бота
@@ -77,6 +92,7 @@ func NewBot(botAPI *tgbotapi.BotAPI, voteChain voteChain, schulze schulze) *Bot 
 		codesByTGDay:       make(map[int64]int),
 		codesByDelegateDay: make(map[int]int),
 		codeAttempts:       make(map[int64]int),
+		codeEmailed:        make(map[int64]bool),
 	}
 }
 
@@ -122,32 +138,56 @@ type schulze interface {
 	SaveResultsToCSV(ctx context.Context) error
 }
 
-// Установка списка кандидатов перед голосованием
+// Установка списка кандидатов перед голосованием: БД читается без b.mu, готовый снимок подставляется под ним
 func (b *Bot) SetCandidates() error {
-	b.mu.Lock()
-	defer b.mu.Unlock()
 	candidates, err := b.voteChain.GetAllCandidates(context.Background())
 	if err != nil {
 		return fmt.Errorf("SetCandidates: %w", err)
 	}
-	b.Candidates = make(map[int]models.Candidate)
-	b.sortedCandidatesIDs = []int{}
+	eligible := make(map[int]models.Candidate)
+	sortedIDs := []int{}
 	for _, candidate := range candidates {
 		if candidate.IsEligible {
-			b.Candidates[candidate.CandidateID] = candidate
+			eligible[candidate.CandidateID] = candidate
 		}
 	}
-	for candidateID := range b.Candidates {
-		b.sortedCandidatesIDs = append(b.sortedCandidatesIDs, candidateID)
+	for candidateID := range eligible {
+		sortedIDs = append(sortedIDs, candidateID)
 	}
-	sort.Ints(b.sortedCandidatesIDs)
+	sort.Ints(sortedIDs)
 
-	b.candidatesList = msgVoteCandidatesHeader
-	for _, k := range b.sortedCandidatesIDs {
-		b.candidatesList += fmt.Sprintf(msgVoteCandidateLineFmt, html.EscapeString(b.Candidates[k].Name), html.EscapeString(b.Candidates[k].Course))
+	list := msgVoteCandidatesHeader
+	for _, k := range sortedIDs {
+		list += fmt.Sprintf(msgVoteCandidateLineFmt, html.EscapeString(eligible[k].Name), html.EscapeString(eligible[k].Course))
 	}
 
+	b.mu.Lock()
+	b.Candidates = eligible
+	b.sortedCandidatesIDs = sortedIDs
+	b.candidatesList = list
+	b.mu.Unlock()
 	return nil
+}
+
+// abandoned: пока апдейт ждал блокировку пользователя, nginx уже закрыл соединение (через 30 с). Telegram не получил
+// ответ и доставит апдейт повторно, поэтому этот экземпляр не обрабатываем: иначе он выполнился бы дважды,
+// а запросы к БД с отменённым контекстом дали бы пользователю «Произошла ошибка»
+func (b *Bot) abandoned(ctx context.Context, update tgbotapi.Update) bool {
+	if ctx.Err() == nil {
+		return false
+	}
+	log.Warnf("апдейт %d пропущен: соединение закрыто, пока он ждал предыдущий апдейт того же пользователя; Telegram доставит его повторно", update.UpdateID)
+	return true
+}
+
+// lockUser захватывает блокировку пользователя (или чата) id и возвращает функцию снятия.
+// Так апдейты одного пользователя — в том числе повторная доставка того же апдейта — не выполняются
+// одновременно, а разные пользователи друг друга не ждут
+func (b *Bot) lockUser(id int64) (unlock func()) {
+	m, _ := b.userLocks.LoadOrStore(id, &sync.Mutex{})
+	mu := m.(*sync.Mutex)
+	mu.Lock()
+	return mu.Unlock
 }
 
 // logWebhookReject логирует каждый отказ (файл и лог-чат); значение секрета в лог не попадает
@@ -176,10 +216,6 @@ func (b *Bot) HandleWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Создаем контекст с таймаутом для обработки запроса
-	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
-	defer cancel()
-
 	// Битое или слишком большое (> 1 MiB) тело отбрасываем с 200: на не-2xx Telegram повторяет update бесконечно и блокирует очередь
 	var update tgbotapi.Update
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&update); err != nil {
@@ -196,7 +232,7 @@ func (b *Bot) HandleWebhook(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 	if update.Message != nil || update.CallbackQuery != nil {
-		b.HandleUpdate(ctx, update) // TODO добавить выход по таймауту
+		b.HandleUpdate(r.Context(), update) // таймаут updateTimeout ставит HandleUpdate после блокировки пользователя
 	}
 
 	w.WriteHeader(http.StatusOK)
@@ -213,6 +249,13 @@ func (b *Bot) HandleUpdate(ctx context.Context, update tgbotapi.Update) {
 		if m := update.Message; m.MigrateToChatID != 0 && (m.Chat.ID == config.AdminChatID || m.Chat.ID == config.LogChatID) {
 			log.Errorf("чат %d мигрировал в %d: обновите ADMIN_CHAT_ID/LOG_CHAT_ID в .env и перезапустите бота", m.Chat.ID, m.MigrateToChatID)
 		}
+		// Апдейты одного чата — по очереди; блокировка снимается и при панике обработчика
+		defer b.lockUser(update.Message.Chat.ID)()
+		if b.abandoned(ctx, update) {
+			return
+		}
+		ctx, cancel := context.WithTimeout(ctx, updateTimeout)
+		defer cancel()
 		if update.Message.IsCommand() {
 			b.handleCommand(ctx, update.Message)
 		} else {
@@ -220,13 +263,20 @@ func (b *Bot) HandleUpdate(ctx context.Context, update tgbotapi.Update) {
 		}
 	case update.CallbackQuery != nil:
 		query := update.CallbackQuery
-		// handleCallbackQuery разыменовывает From и Message; паника там оставила бы b.mu захваченным навсегда
+		// handleCallbackQuery разыменовывает From и Message
 		if query.From == nil || query.Message == nil {
 			if b.botAPI != nil {
 				b.botAPI.Request(tgbotapi.NewCallback(query.ID, ""))
 			}
 			return
 		}
+		// Нажатия одного делегата — по очереди; блокировка снимается и при панике обработчика
+		defer b.lockUser(query.From.ID)()
+		if b.abandoned(ctx, update) {
+			return
+		}
+		ctx, cancel := context.WithTimeout(ctx, updateTimeout)
+		defer cancel()
 		b.handleCallbackQuery(ctx, query)
 	}
 }
@@ -332,24 +382,22 @@ func (b *Bot) SendMessage(chatID int64, text string) error {
 	return err
 }
 
+// /log <уровень>: один порог для файла/консоли и для лог-чата; регистр любой (debug, Info, WARN, error)
 func (b *Bot) handleLog(_ context.Context, message *tgbotapi.Message) {
-	level := message.CommandArguments()
-	var err error
+	level := strings.ToLower(strings.TrimSpace(message.CommandArguments()))
 	switch level {
-	case "Debug":
-		err = log.SetLevel("Debug")
-	case "Info":
-		err = log.SetLevel("Info")
-	case "Warn":
-		err = log.SetLevel("Warn")
-	case "Error":
-		err = log.SetLevel("Error")
+	case "debug", "info", "warn", "warning", "error":
 	default:
-		log.Errorf("%d Неизвестный уровень логирования: %s", message.Chat.ID, level)
+		log.Errorf("%d Неизвестный уровень логирования: %q (ожидается debug, info, warn или error)", message.Chat.ID, level)
 		return
 	}
-	if err != nil {
+	if err := log.SetLevel(level); err != nil {
 		log.Errorf("%d Ошибка при изменении уровня логирования: %v", message.Chat.ID, err)
 		return
 	}
+	if err := log.SetTelegramLevel(level); err != nil {
+		log.Errorf("%d Ошибка при изменении уровня лог-чата: %v", message.Chat.ID, err)
+		return
+	}
+	log.Infof("%d Уровень логов (файл и лог-чат): %s", message.Chat.ID, level)
 }

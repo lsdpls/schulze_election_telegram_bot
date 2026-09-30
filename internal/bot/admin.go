@@ -2,6 +2,7 @@ package bot
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"html"
 	"io"
@@ -11,7 +12,9 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/lsdpls/schulze_election_telegram_bot/internal/chain"
 	"github.com/lsdpls/schulze_election_telegram_bot/internal/models"
+	schulzepkg "github.com/lsdpls/schulze_election_telegram_bot/internal/schulze"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
@@ -77,17 +80,59 @@ func (b *Bot) handleDeleteDelegate(ctx context.Context, message *tgbotapi.Messag
 		return
 	}
 
-	// Удаляем делегата из базы данных
+	// Удаляем делегата из базы данных; проголосовавшего chain не удаляет (ErrDelegateHasVoted)
 	if err := b.voteChain.DeleteDelegate(ctx, delegateID); err != nil {
+		if errors.Is(err, chain.ErrDelegateHasVoted) {
+			log.Warnf("%d Отказ в удалении проголосовавшего делегата st%06d", chatID, delegateID)
+			if err := b.SendMessage(chatID, fmt.Sprintf(msgAdminDelegateHasVotedFmt, delegateID)); err != nil {
+				log.Errorf("%d Ошибка ответа об отказе в удалении делегата: %v", chatID, err)
+			}
+			return
+		}
 		log.Errorf("%d Ошибка при удалении делегата: %v", chatID, err)
 		return
 	}
 	log.Info(chatID, " Делегат успешно удален")
 }
 
+// refuseIfVotingActive: пока голосование открыто, состав кандидатов менять нельзя (добавлять, снимать, удалять).
+// Возвращает true и отвечает в админ-чат, если голосование открыто. Вызывать под b.votingMu
+func (b *Bot) refuseIfVotingActive(message *tgbotapi.Message) bool {
+	b.mu.RLock()
+	active := b.activeVoting
+	b.mu.RUnlock()
+	if !active {
+		return false
+	}
+	log.Warnf("%d Попытка изменить состав кандидатов при открытом голосовании: /%s", message.Chat.ID, message.Command())
+	if err := b.SendMessage(message.Chat.ID, msgAdminCandidatesFrozen); err != nil {
+		log.Errorf("%d Ошибка ответа о запрете изменения кандидатов: %v", message.Chat.ID, err)
+	}
+	return true
+}
+
 // Обработчик команды /add_candidate
 func (b *Bot) handleAddCandidate(ctx context.Context, message *tgbotapi.Message) {
 	chatID := message.Chat.ID
+	b.votingMu.Lock()
+	defer b.votingMu.Unlock()
+	if b.refuseIfVotingActive(message) {
+		return
+	}
+	// Голосование уже начиналось (есть бюллетени, в том числе после /stop_voting или перезапуска бота):
+	// нового кандидата нет ни в одном поданном бюллетене, и подсчёт дал бы неразрешимую ничью
+	votes, err := b.voteChain.GetAllVotes(ctx)
+	if err != nil {
+		log.Errorf("%d Ошибка проверки бюллетеней перед добавлением кандидата: %v", chatID, err)
+		return
+	}
+	if len(votes) > 0 {
+		log.Warnf("%d Попытка добавить кандидата, когда уже есть бюллетени (%d)", chatID, len(votes))
+		if err := b.SendMessage(chatID, fmt.Sprintf(msgAdminCandidateAddAfterVotesFmt, len(votes))); err != nil {
+			log.Errorf("%d Ошибка ответа о запрете добавления кандидата: %v", chatID, err)
+		}
+		return
+	}
 	candidateMsg := message.CommandArguments()
 
 	// Разделяем сообщение на части
@@ -131,9 +176,14 @@ func (b *Bot) handleAddCandidate(ctx context.Context, message *tgbotapi.Message)
 	log.Info(chatID, " Кандидат успешно добавлен")
 }
 
-// Обработчик команды /ban_candidate
+// Обработчик команды /ban_candidate: снять кандидата с выборов (is_eligible = false), только при закрытом голосовании
 func (b *Bot) handleBanCandidate(ctx context.Context, message *tgbotapi.Message) {
 	chatID := message.Chat.ID
+	b.votingMu.Lock()
+	defer b.votingMu.Unlock()
+	if b.refuseIfVotingActive(message) {
+		return
+	}
 	candidateMsg := message.CommandArguments()
 
 	// Извлекаем ID кандидата из сообщения
@@ -151,9 +201,15 @@ func (b *Bot) handleBanCandidate(ctx context.Context, message *tgbotapi.Message)
 	log.Info(chatID, " Кандидат успешно заблокирован")
 }
 
-// Обработчик команды /delete_candidate
+// Обработчик команды /delete_candidate: кандидата из БД не удаляем никогда — снимаем мягко (is_eligible = false),
+// как /ban_candidate. Бюллетени с его ID остаются, при подсчёте он не учитывается. Только при закрытом голосовании
 func (b *Bot) handleDeleteCandidate(ctx context.Context, message *tgbotapi.Message) {
 	chatID := message.Chat.ID
+	b.votingMu.Lock()
+	defer b.votingMu.Unlock()
+	if b.refuseIfVotingActive(message) {
+		return
+	}
 	candidateMsg := message.CommandArguments()
 
 	// Извлекаем ID кандидата из сообщения
@@ -163,12 +219,12 @@ func (b *Bot) handleDeleteCandidate(ctx context.Context, message *tgbotapi.Messa
 		return
 	}
 
-	// Удаляем кандидата
-	if err := b.voteChain.DeleteCandidate(ctx, candidateID); err != nil {
+	// Снимаем кандидата (мягкое удаление)
+	if err := b.voteChain.BanCandidate(ctx, candidateID); err != nil {
 		log.Errorf("%d Ошибка при удалении кандидата: %v", chatID, err)
 		return
 	}
-	log.Info(chatID, " Кандидат успешно удален")
+	log.Info(chatID, " Кандидат успешно удален (снят с выборов, запись в базе сохранена)")
 }
 
 // Обработчик команды /show_delegates
@@ -309,6 +365,8 @@ func (b *Bot) handleShowVotes(ctx context.Context, message *tgbotapi.Message) {
 
 // Обработчик команды /start_voting
 func (b *Bot) handleStartVoting(_ context.Context, message *tgbotapi.Message) {
+	b.votingMu.Lock()
+	defer b.votingMu.Unlock()
 	// Обновляем список кандидатов
 	if err := b.SetCandidates(); err != nil {
 		log.Errorf("%d Ошибка при обновлении списка кандидатов: %v", message.From.ID, err)
@@ -322,6 +380,8 @@ func (b *Bot) handleStartVoting(_ context.Context, message *tgbotapi.Message) {
 
 // Обработчик команды /stop_voting
 func (b *Bot) handleStopVoting(_ context.Context, message *tgbotapi.Message) {
+	b.votingMu.Lock()
+	defer b.votingMu.Unlock()
 	b.mu.Lock()
 	b.activeVoting = false
 	b.mu.Unlock()
@@ -375,31 +435,108 @@ func isValidGroup(group string) bool {
 	return re.MatchString(group)
 }
 
-// Обработчик команды /results
+// Обработчик команды /results. «Результаты успешно вычислены» — только если посчитано всё. Об ошибке и о ничьей,
+// которую тай-брейк не разрешил, бот пишет в админ-чат (и в лог). CSV отправляется при успехе и при неразрешённой
+// ничьей (матрицы курсов нужны для ручного подсчёта), при прочих ошибках — нет
 func (b *Bot) handleResults(ctx context.Context, message *tgbotapi.Message) {
-	if err := b.schulze.SetCandidates(); err != nil {
-		log.Errorf("%d %v", message.Chat.ID, err)
+	chatID := message.Chat.ID
+	// Загрузка данных: если она не удалась, считать нечего
+	for _, load := range []func() error{
+		b.schulze.SetCandidates,
+		b.schulze.SetVotes,
+		b.schulze.SetCandidatesByCourse,
+		b.schulze.SetVotesByCourse,
+	} {
+		if err := load(); err != nil {
+			b.reportResultsErrors(chatID, err)
+			return
+		}
 	}
-	if err := b.schulze.SetVotes(); err != nil {
-		log.Errorf("%d %v", message.Chat.ID, err)
-	}
-	if err := b.schulze.SetCandidatesByCourse(); err != nil {
-		log.Errorf("%d %v", message.Chat.ID, err)
-	}
-	if err := b.schulze.SetVotesByCourse(); err != nil {
-		log.Errorf("%d %v", message.Chat.ID, err)
-	}
+	// Общие места считаются только после победителей всех курсов: от них зависят число мест и состав пула
 	if err := b.schulze.ComputeResults(ctx); err != nil {
-		log.Errorf("%d %v", message.Chat.ID, err)
+		if onlyTies := b.reportResultsErrors(chatID, err); onlyTies {
+			b.handleCSV(ctx, message)
+		}
+		return
 	}
 	if err := b.schulze.ComputeGlobalTop(ctx); err != nil {
-		log.Errorf("%d %v", message.Chat.ID, err)
+		if onlyTies := b.reportResultsErrors(chatID, err); onlyTies {
+			b.handleCSV(ctx, message)
+		}
+		return
 	}
 	log.Info(message.Chat.ID, " Результаты успешно вычислены")
 	// if err := b.schulze.SaveResultsToCSV(ctx); err != nil {
 	// 	log.Errorf("%d %v", message.Chat.ID, err)
 	// }
 	b.handleCSV(ctx, message)
+}
+
+// reportResultsErrors пишет каждую ошибку подсчёта в лог и отдельным сообщением в админ-чат.
+// Возвращает true, если все ошибки — неразрешённые ничьи (*schulze.TieError)
+func (b *Bot) reportResultsErrors(chatID int64, err error) (onlyTies bool) {
+	onlyTies = true
+	for _, e := range flattenErrors(err) {
+		var tie *schulzepkg.TieError
+		var text string
+		switch {
+		case errors.As(e, &tie):
+			log.Warnf("%d %v", chatID, e)
+			text = formatTieMessage(tie)
+		case errors.Is(e, schulzepkg.ErrNoVotes):
+			onlyTies = false
+			log.Errorf("%d %v", chatID, e)
+			text = msgAdminResultsNoVotes
+		default:
+			onlyTies = false
+			log.Errorf("%d %v", chatID, e)
+			text = fmt.Sprintf(msgAdminResultsErrorFmt, html.EscapeString(e.Error()))
+		}
+		if err := b.SendMessage(chatID, text); err != nil {
+			log.Errorf("%d Ошибка отправки сообщения о результатах подсчёта: %v", chatID, err)
+		}
+	}
+	return onlyTies
+}
+
+// flattenErrors раскрывает errors.Join (в том числе вложенные) в плоский список
+func flattenErrors(err error) []error {
+	if err == nil {
+		return nil
+	}
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		var out []error
+		for _, e := range joined.Unwrap() {
+			out = append(out, flattenErrors(e)...)
+		}
+		return out
+	}
+	return []error{err}
+}
+
+// formatTieMessage — текст уведомления о неразрешённой ничьей для админ-чата
+func formatTieMessage(tie *schulzepkg.TieError) string {
+	details := formatCandidates(tie.Unresolved)
+	if len(tie.Tied) > len(tie.Unresolved) {
+		details = fmt.Sprintf(msgAdminResultsTieNarrowedFmt, formatCandidates(tie.Tied), formatCandidates(tie.Unresolved))
+	}
+	if tie.Course != "" {
+		return fmt.Sprintf(msgAdminResultsTieCourseFmt, html.EscapeString(tie.Course), details)
+	}
+	decided := msgAdminResultsNobody
+	if len(tie.Decided) > 0 {
+		decided = formatCandidates(tie.Decided)
+	}
+	return fmt.Sprintf(msgAdminResultsTieCommonFmt, tie.Place, tie.Places, details, decided, tie.Places-tie.Place+1)
+}
+
+// formatCandidates: «st123456 Иванов И.И., st654321 Петров П.П.» (имена экранированы для HTML)
+func formatCandidates(candidates []models.Candidate) string {
+	parts := make([]string, len(candidates))
+	for i, c := range candidates {
+		parts[i] = fmt.Sprintf("st%06d %s", c.CandidateID, html.EscapeString(c.Name))
+	}
+	return strings.Join(parts, ", ")
 }
 
 // TODO: move to utils

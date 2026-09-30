@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"github.com/lsdpls/schulze_election_telegram_bot/internal/models"
+	"sort"
 
 	"github.com/sirupsen/logrus"
 )
@@ -48,6 +49,9 @@ func (s *Schulze) SetCandidates() error {
 	if err != nil {
 		return fmt.Errorf("SetCandidates: %w", err)
 	}
+	// Порядок кандидатов — по ID, а не по порядку строк в БД: встроенный тай-брейк перебирает пары по порядку,
+	// и без сортировки исход ничьей мог зависеть от того, в каком порядке PostgreSQL вернул строки
+	sort.Slice(candidates, func(i, j int) bool { return candidates[i].CandidateID < candidates[j].CandidateID })
 	s.candidates = candidates
 	logrus.Debug(s.candidates)
 	return nil
@@ -61,6 +65,9 @@ func (s *Schulze) SetVotes() error {
 	// copy не работает
 	s.votes = votes
 	logrus.Debug(s.votes)
+	if len(votes) == 0 {
+		return fmt.Errorf("SetVotes: %w", ErrNoVotes)
+	}
 	return nil
 }
 

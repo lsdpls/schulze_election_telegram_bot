@@ -202,3 +202,24 @@ func TestHandleWebhookRecoversFromPanic(t *testing.T) {
 		t.Fatalf("паника не залогирована: %v", e)
 	}
 }
+
+// /log принимает любой регистр и меняет уровень файла (logrus) — порог лог-чата меняется тем же вызовом
+func TestHandleLogAnyCase(t *testing.T) {
+	setAdminChat(t, -1001234)
+	b := &Bot{}
+	for _, tc := range []struct {
+		arg  string
+		want logrus.Level
+	}{{"debug", logrus.DebugLevel}, {"WARN", logrus.WarnLevel}, {"Error", logrus.ErrorLevel}, {"info", logrus.InfoLevel}} {
+		b.handleCommand(context.Background(), adminCommand(config.AdminChatID, "/log "+tc.arg))
+		if got := logrus.GetLevel(); got != tc.want {
+			t.Fatalf("/log %s: уровень %v, want %v", tc.arg, got, tc.want)
+		}
+	}
+	logHook.Reset()
+	b.handleCommand(context.Background(), adminCommand(config.AdminChatID, "/log loud"))
+	if e := logHook.LastEntry(); e == nil || !strings.Contains(e.Message, "Неизвестный уровень") {
+		t.Fatalf("неизвестный уровень не отклонён: %v", e)
+	}
+	logrus.SetLevel(logrus.DebugLevel) // вернуть уровень для остальных тестов
+}

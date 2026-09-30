@@ -20,6 +20,19 @@ func (s *Storage) AddVote(ctx context.Context, tx pgx.Tx, vote models.Vote) erro
 	return nil
 }
 
+// Запись голоса делегата: первый голос вставляется, повторный перезаписывает прежний (delegate_id уникален)
+func (s *Storage) UpsertVote(ctx context.Context, tx pgx.Tx, vote models.Vote) error {
+	_, err := tx.Exec(ctx,
+		`INSERT INTO votes (delegate_id, candidate_rankings, created_at) VALUES ($1, $2, $3)
+		 ON CONFLICT (delegate_id) DO UPDATE SET candidate_rankings = EXCLUDED.candidate_rankings, created_at = EXCLUDED.created_at`,
+		vote.DelegateID, vote.CandidateRankings, vote.CreatedAt)
+	if err != nil {
+		return fmt.Errorf("UpsertVote: upsert failed: %w", err)
+	}
+
+	return nil
+}
+
 // Получение голоса по ID делегата
 func (s *Storage) GetVoteByDelegateID(ctx context.Context, tx pgx.Tx, delegateID int) (*models.Vote, error) {
 	var vote models.Vote

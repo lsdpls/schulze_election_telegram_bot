@@ -36,6 +36,7 @@ type storage interface {
 	DeleteCandidate(ctx context.Context, tx pgx.Tx, candidateID int) error
 
 	AddVote(ctx context.Context, tx pgx.Tx, vote models.Vote) error
+	UpsertVote(ctx context.Context, tx pgx.Tx, vote models.Vote) error
 	GetVoteByDelegateID(ctx context.Context, tx pgx.Tx, delegateID int) (*models.Vote, error)
 	GetAllVotes(ctx context.Context, tx pgx.Tx) ([]models.Vote, error)
 	UpdateVote(ctx context.Context, tx pgx.Tx, vote models.Vote) error

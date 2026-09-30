@@ -6,9 +6,18 @@ import (
 	"github.com/lsdpls/schulze_election_telegram_bot/internal/config"
 	"github.com/lsdpls/schulze_election_telegram_bot/internal/utils"
 	"strconv"
+	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
+
+// Время на запись голоса в БД вместе с повторами транзакции. Отсчитывается заново, а не от 10 секунд вебхука:
+// голос, собранный целиком, должен записаться, даже если обработка апдейта уже почти исчерпала своё время
+const voteSaveTimeout = 15 * time.Second
+
+// Все обработчики голосования работают с общими картами только под b.mu и только внутри памяти:
+// запросы к Telegram, БД и логи (лог-чат — тоже Telegram) идут после снятия блокировки.
+// Нажатия одного делегата выполняются по очереди благодаря блокировке пользователя в HandleUpdate.
 
 // Обработчик команды /vote
 func (b *Bot) handleVote(ctx context.Context, message *tgbotapi.Message) {
@@ -56,10 +65,10 @@ func (b *Bot) handleVote(ctx context.Context, message *tgbotapi.Message) {
 // Отправка бюллетеня
 func (b *Bot) sendCandidateKeyboard(_ context.Context, message *tgbotapi.Message, editMsg bool) {
 	telegramID := message.Chat.ID
-	b.mu.RLock()
-	defer b.mu.RUnlock()
 	// TODO добавить кнопку отмены последнего голоса
 
+	// Кнопки и текст собираем под b.mu, отправляем без него
+	b.mu.RLock()
 	// Создаем кнопки выбора кандидата
 	var keyboard tgbotapi.InlineKeyboardMarkup
 	for _, candidateID := range b.sortedCandidatesIDs {
@@ -73,6 +82,14 @@ func (b *Bot) sendCandidateKeyboard(_ context.Context, message *tgbotapi.Message
 		)
 		keyboard.InlineKeyboard = append(keyboard.InlineKeyboard, []tgbotapi.InlineKeyboardButton{button})
 	}
+	msgText := msgVoteBallotHeader
+	if editMsg {
+		for i, candidateID := range b.rankedList[telegramID] {
+			msgText += fmt.Sprintf(msgVoteBallotLineFmt, i+1, b.Candidates[candidateID].Name)
+		}
+	}
+	b.mu.RUnlock()
+
 	// Проверяем остались ли кандидаты для выбора
 	if len(keyboard.InlineKeyboard) == 0 {
 		log.Warn(message.Chat.ID, " Попытка вписать кандидатов, когда все уже вписаны")
@@ -82,10 +99,6 @@ func (b *Bot) sendCandidateKeyboard(_ context.Context, message *tgbotapi.Message
 
 	// Отправляем сообщение с клавиатурой
 	if editMsg {
-		msgText := msgVoteBallotHeader
-		for i, candidateID := range b.rankedList[telegramID] {
-			msgText += fmt.Sprintf(msgVoteBallotLineFmt, i+1, b.Candidates[candidateID].Name)
-		}
 		msg := tgbotapi.NewEditMessageTextAndMarkup(
 			message.Chat.ID,
 			message.MessageID,
@@ -96,7 +109,7 @@ func (b *Bot) sendCandidateKeyboard(_ context.Context, message *tgbotapi.Message
 			log.Errorf("%d ошибка записи бюллетеня: %v", telegramID, err)
 		}
 	} else {
-		msg := tgbotapi.NewMessage(message.Chat.ID, msgVoteBallotHeader)
+		msg := tgbotapi.NewMessage(message.Chat.ID, msgText)
 		msg.ReplyMarkup = keyboard
 		if _, err := b.botAPI.Send(msg); err != nil {
 			log.Errorf("%d ошибка отправки бюллетеня: %v", telegramID, err)
@@ -131,62 +144,77 @@ func (b *Bot) handleCallbackQuery(ctx context.Context, query *tgbotapi.CallbackQ
 	// 	b.botAPI.Send(msg)
 	// 	return
 	// }
+
+	// Под b.mu только меняем бюллетень в памяти и снимаем копию; Telegram и БД — после Unlock
 	b.mu.Lock()
+	total := len(b.Candidates)
 	// Проверяем не испорчен ли бюллетень (rankedList) делегата
-	if len(b.rankedList[telegramID]) >= len(b.Candidates) {
+	full := len(b.rankedList[telegramID]) >= total
+	var ranked []int
+	if !full {
+		// Добавляем ID кандидата в список ранжирования
+		b.rankedList[telegramID] = append(b.rankedList[telegramID], candidateID)
+		ranked = append([]int(nil), b.rankedList[telegramID]...)
+	}
+	b.mu.Unlock()
+
+	if full {
 		log.Warn(telegramID, " Попытка вписать кандидатов в заполненный бюллетень")
 		b.spoilBallot(telegramID, query.Message)
-		b.mu.Unlock()
 		return
 	}
-	// Добавляем ID кандидата в список ранжирования
-	b.rankedList[telegramID] = append(b.rankedList[telegramID], candidateID)
 	if _, err := b.botAPI.Request(tgbotapi.NewCallback(query.ID, msgVoteCallbackAccepted)); err != nil {
 		log.Errorf("%d ошибка ответа на нажатие кнопки: %v", telegramID, err)
 	}
 
 	// Проверяем, все ли кандидаты ранжированы
-	if len(b.rankedList[telegramID]) == len(b.Candidates) {
+	if len(ranked) == total {
 		// Проверяем, не испорчен ли бюллетень
-		if !isUniqueCandidates(b.rankedList[telegramID]) {
+		if !isUniqueCandidates(ranked) {
 			log.Warn(telegramID, " Испорченный бюллетень (повтор кандидатов)")
 			b.spoilBallot(telegramID, query.Message)
-			b.mu.Unlock()
 			return
 		}
 		// Отправка бюллетеня
-		b.mu.Unlock()
-		b.sendRankedList(ctx, query)
+		b.sendRankedList(ctx, query, ranked)
 		// TODO удаление списка ранжирования (Не имеет смысла при текущей реализации порчи бюллетеня)
 		return
 	}
 
 	// ждем следующую отмеку в бюллетене
-	b.mu.Unlock()
 	b.sendCandidateKeyboard(ctx, query.Message, true)
 }
 
-// Отправка заполненного бюллетеня
-func (b *Bot) sendRankedList(ctx context.Context, query *tgbotapi.CallbackQuery) {
+// Отправка заполненного бюллетеня: сначала запись голоса, и только после успешной записи — «итоговый бюллетень»
+func (b *Bot) sendRankedList(ctx context.Context, query *tgbotapi.CallbackQuery, ranked []int) {
 	telegramID := query.From.ID
+	// Строки бюллетеня собираем под b.mu, БД и Telegram — без него
 	b.mu.RLock()
-	defer b.mu.RUnlock()
-	// Отправляем бюллетень и удаляем клавиатуру
-	msgText := msgVoteFinalBallotHeader
-	for i, candidateID := range b.rankedList[telegramID] {
-		msgText += fmt.Sprintf(msgVoteBallotLineFmt, i+1, b.Candidates[candidateID].Name)
+	var lines string
+	for i, candidateID := range ranked {
+		lines += fmt.Sprintf(msgVoteBallotLineFmt, i+1, b.Candidates[candidateID].Name)
 	}
-	editMsg := tgbotapi.NewEditMessageText(telegramID, query.Message.MessageID, msgText)
-	if _, err := b.botAPI.Send(editMsg); err != nil {
-		log.Errorf("%d ошибка отправки заполненного бюллетеня: %v", telegramID, err)
-	}
-	// Запись голоса в базу данных
-	log.Debugf("%d rankedList: %v", telegramID, b.rankedList[telegramID])
-	err := b.voteChain.AddVote(ctx, telegramID, b.rankedList[telegramID])
-	if err != nil {
+	b.mu.RUnlock()
+
+	// Запись голоса в базу данных: свой таймаут, не зависящий от отмены контекста вебхука
+	log.Debugf("%d rankedList: %v", telegramID, ranked)
+	saveCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), voteSaveTimeout)
+	defer cancel()
+	if err := b.voteChain.AddVote(saveCtx, telegramID, ranked); err != nil {
 		log.Errorf("%d ошибка регистрации голоса: %v", telegramID, err)
+		// Голос не записан: «итоговый бюллетень» не показываем, кнопки убираем (редактирование без клавиатуры)
+		editMsg := tgbotapi.NewEditMessageText(telegramID, query.Message.MessageID, msgVoteBallotHeader+lines)
+		if _, err := b.botAPI.Send(editMsg); err != nil {
+			log.Errorf("%d ошибка снятия клавиатуры с незаписанного бюллетеня: %v", telegramID, err)
+		}
 		b.SendMessage(telegramID, msgSysVoteSaveError)
 		return
+	}
+
+	// Отправляем бюллетень и удаляем клавиатуру
+	editMsg := tgbotapi.NewEditMessageText(telegramID, query.Message.MessageID, msgVoteFinalBallotHeader+lines)
+	if _, err := b.botAPI.Send(editMsg); err != nil {
+		log.Errorf("%d ошибка отправки заполненного бюллетеня: %v", telegramID, err)
 	}
 
 	// Генерируем токен из telegramID (детерминированный, каждый раз одинаковый)

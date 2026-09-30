@@ -2,16 +2,28 @@ package schulze
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"sort"
 
 	"github.com/lsdpls/schulze_election_telegram_bot/internal/models"
 
 	"github.com/sirupsen/logrus"
 )
 
-// Метод для вычисления результатов голосования по методу Шульце
+// Метод для вычисления результатов голосования по методу Шульце.
+// Считает все курсы и возвращает все ошибки вместе (errors.Join): неразрешённая ничья курса — *TieError
+// (строка со stage='tie' при этом записывается, как раньше), сбой записи — обычная ошибка.
 func (s *Schulze) ComputeResults(ctx context.Context) error {
-	for course, votes := range s.votesByCourse {
+	var errs []error
+	// Курсы по порядку: сообщения об ошибках приходят в одном и том же порядке
+	courses := make([]string, 0, len(s.votesByCourse))
+	for course := range s.votesByCourse {
+		courses = append(courses, course)
+	}
+	sort.Strings(courses)
+	for _, course := range courses {
+		votes := s.votesByCourse[course]
 		candidates := s.candidatesByCourse[course]
 		var result models.Result
 		// candidatesIDs := make([]int, len(candidates))
@@ -28,7 +40,7 @@ func (s *Schulze) ComputeResults(ctx context.Context) error {
 
 		if len(potentialWinners) < 1 {
 			logrus.Errorf("no winners for course %s", course)
-			// TODO отправить это куда нужно
+			errs = append(errs, fmt.Errorf("ComputeResults: no winners for course %s", course))
 			continue
 		}
 		// 4. Сохранение результатов
@@ -40,21 +52,23 @@ func (s *Schulze) ComputeResults(ctx context.Context) error {
 				StrongestPaths:    strongestPaths,
 				Stage:             "absolute",
 			}
-			// TODO отправить это куда нужно
 			if err := s.voteChain.AddResult(ctx, result); err != nil {
 				logrus.Errorf("cant AddResult for %s: %v", course, err)
+				errs = append(errs, fmt.Errorf("ComputeResults: cant AddResult for %s: %w", course, err))
 			}
 			continue
 		}
 
 		// 5. Если ничья (нет однозначного победителя)
+		tied := potentialWinners
 		potentialWinners, err := s.tieBreaker(potentialWinners, candidates, preferences, strongestPaths)
 		if err != nil {
-			// TODO Всегда nil в текущей реализации
+			errs = append(errs, fmt.Errorf("ComputeResults: tie-breaker for %s: %w", course, err))
 			continue
 		}
 
 		if len(potentialWinners) == 1 {
+			logrus.Warnf("курс %s: ничья между %s разрешена тай-брейком в пользу st%06d", course, candidateIDs(tied), potentialWinners[0].CandidateID)
 			result = models.Result{
 				Course:            course,
 				WinnerCandidateID: []int{potentialWinners[0].CandidateID},
@@ -62,9 +76,9 @@ func (s *Schulze) ComputeResults(ctx context.Context) error {
 				StrongestPaths:    strongestPaths,
 				Stage:             "tie-breaker",
 			}
-			// TODO отправить это куда нужно
 			if err := s.voteChain.AddResult(ctx, result); err != nil {
 				logrus.Errorf("cant AddResult for %s: %v", course, err)
+				errs = append(errs, fmt.Errorf("ComputeResults: cant AddResult for %s: %w", course, err))
 			}
 			continue
 		}
@@ -81,10 +95,12 @@ func (s *Schulze) ComputeResults(ctx context.Context) error {
 		}
 		if err := s.voteChain.AddResult(ctx, result); err != nil {
 			logrus.Errorf("cant AddResult for %s: %v", course, err)
+			errs = append(errs, fmt.Errorf("ComputeResults: cant AddResult for %s: %w", course, err))
 		}
+		errs = append(errs, &TieError{Course: course, Tied: tied, Unresolved: potentialWinners})
 	}
 
-	return nil
+	return errors.Join(errs...)
 }
 
 // TODO унифицировать итерации по слайсам: то if ==, то [i+1], то if !=
@@ -101,11 +117,18 @@ func (s *Schulze) computePairwisePreferences(votes []models.Vote, candidates []m
 			}
 		}
 	}
-	// Подсчёт попарных предпочтений на основе ранжировок
+	// Подсчёт попарных предпочтений на основе ранжировок. ID, которых нет среди candidates (кандидат снят
+	// с выборов после голосования или неизвестен), пропускаются: так он просто не участвует в подсчёте
 	for _, vote := range votes {
 		for i, candidate1 := range vote.CandidateRankings {
+			row, ok := pairwisePreferences[candidate1]
+			if !ok {
+				continue
+			}
 			for _, candidate2 := range vote.CandidateRankings[i+1:] {
-				pairwisePreferences[candidate1][candidate2]++
+				if _, ok := row[candidate2]; ok { // в row только другие известные кандидаты
+					row[candidate2]++
+				}
 			}
 		}
 	}

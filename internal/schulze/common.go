@@ -87,11 +87,17 @@ func (s *Schulze) excludeCourseWinners(ctx context.Context, allCandidates []mode
 		}
 	}
 
+	// В бюллетенях общих мест оставляем только кандидатов общих мест: победители курсов исключены,
+	// а снятые с выборов (is_eligible = false) и неизвестные ID в allCandidates не входят и тоже пропускаются
+	commonIDs := make(map[int]bool, len(commonCandidates))
+	for _, candidate := range commonCandidates {
+		commonIDs[candidate.CandidateID] = true
+	}
 	coomonVotes := make([]models.Vote, 0)
 	for _, vote := range allvotes {
 		var filteredRankings []int
 		for _, candidateID := range vote.CandidateRankings {
-			if !excludedCandidateIDs[candidateID] {
+			if commonIDs[candidateID] {
 				filteredRankings = append(filteredRankings, candidateID)
 			}
 		}
@@ -114,20 +120,37 @@ func (s *Schulze) buildStrictOrder(candidates []models.Candidate, preferences, s
 		return nil, fmt.Errorf("failed to copy slice")
 	}
 
+	places := commonPlaces
 	// Пока есть оставшиеся кандидаты и места для ранжирования
 	for len(remainingCandidates) > 0 && commonPlaces > 0 {
 		// Шаг 1: Находим потенциальных победителей среди оставшихся кандидатов
 		potentialWinners := s.findPotentialWinners(strongestPaths, remainingCandidates)
-		// Шаг 2: Если несколько потенциальных победителей, разрешаем ничью
+		// Шаг 2: Если несколько потенциальных победителей, разрешаем ничью.
+		// Тай-брейку нужен весь пул candidates: матрицы путей посчитаны по всем кандидатам общих мест,
+		// и сильнейшие пути между равными могут проходить через уже избранных
 		if len(potentialWinners) > 1 {
-			potentialWinners, err := s.tieBreaker(potentialWinners, remainingCandidates, preferences, strongestPaths)
+			resolved, err := s.tieBreaker(potentialWinners, candidates, preferences, strongestPaths)
 			if err != nil {
-				return nil, err // TODO всегда nil
+				return nil, fmt.Errorf("buildStrictOrder: %w", err)
 			}
-			// Если ничья не разрешена, то у нас слишком глубокая ничья
-			if len(potentialWinners) > 1 {
-				return nil, fmt.Errorf("buildStrictOrder: too deep tie")
+			// Тай-брейк не выбрал одного. Если все оставшиеся кандидаты помещаются в оставшиеся места,
+			// избраны все и порядок между ними ни на что не влияет; иначе ничью решают вручную
+			if len(resolved) > 1 && len(remainingCandidates) <= commonPlaces {
+				logrus.Warnf("общие места: ничья за место %d между %s не разрешена, но все оставшиеся (%d) помещаются в оставшиеся места (%d) — избраны все", len(strictOrder)+1, candidateIDs(potentialWinners), len(remainingCandidates), commonPlaces)
+				strictOrder = append(strictOrder, remainingCandidates...)
+				break
 			}
+			if len(resolved) > 1 {
+				return nil, &TieError{
+					Place:      len(strictOrder) + 1,
+					Places:     places,
+					Decided:    append([]models.Candidate(nil), strictOrder...),
+					Tied:       potentialWinners,
+					Unresolved: resolved,
+				}
+			}
+			logrus.Warnf("общие места: ничья за место %d между %s разрешена тай-брейком в пользу st%06d", len(strictOrder)+1, candidateIDs(potentialWinners), resolved[0].CandidateID)
+			potentialWinners = resolved
 		}
 
 		// Шаг 3: Добавляем единственного победителя в начало строгого порядка

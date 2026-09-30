@@ -13,167 +13,136 @@ import (
 // ErrAlreadyVerified — делегат уже привязан к другому Telegram-аккаунту
 var ErrAlreadyVerified = errors.New("delegate already verified by another account")
 
+// ErrDelegateHasVoted — делегат уже проголосовал; удалять его нельзя, иначе вместе с ним удалился бы бюллетень
+var ErrDelegateHasVoted = errors.New("delegate has already voted")
+
 func (vc *VoteChain) AddDelegate(ctx context.Context, delegate models.Delegate) error {
-	tx, err := vc.storage.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
-	if err != nil {
-		return fmt.Errorf("chain.AddDelegate: can't start transaction: %w", err)
-	}
-	defer tx.Rollback(ctx)
-
-	delegateDB, err := vc.storage.GetDelegateByDelegateID(ctx, tx, delegate.DelegateID)
+	err := vc.inTx(ctx, func(tx pgx.Tx) error {
+		delegateDB, err := vc.storage.GetDelegateByDelegateID(ctx, tx, delegate.DelegateID)
+		if err != nil {
+			return err
+		}
+		if delegateDB != nil {
+			return fmt.Errorf("delegate already exists")
+		}
+		return vc.storage.AddDelegate(ctx, tx, delegate)
+	})
 	if err != nil {
 		return fmt.Errorf("chain.AddDelegate: %w", err)
-	}
-	if delegateDB != nil {
-		return fmt.Errorf("chain.AddDelegate: delegate already exists")
-	}
-
-	if err := vc.storage.AddDelegate(ctx, tx, delegate); err != nil {
-		return fmt.Errorf("chain.AddDelegate: %w", err)
-	}
-
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("chain.AddDelegate: can't commit transaction: %w", err)
 	}
 	return nil
 }
 
 func (vc *VoteChain) GetDelegateByDelegateID(ctx context.Context, delegateID int) (*models.Delegate, error) {
-	tx, err := vc.storage.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
-	if err != nil {
-		return nil, fmt.Errorf("chain.GetDelegateByEmail: can't start transaction: %w", err)
-	}
-	defer tx.Rollback(ctx)
-
-	delegate, err := vc.storage.GetDelegateByDelegateID(ctx, tx, delegateID)
+	var delegate *models.Delegate
+	err := vc.inTx(ctx, func(tx pgx.Tx) error {
+		var err error
+		delegate, err = vc.storage.GetDelegateByDelegateID(ctx, tx, delegateID)
+		return err
+	})
 	if err != nil {
 		return nil, fmt.Errorf("chain.GetDelegateByEmail: %w", err)
 	}
-
 	return delegate, nil
 }
 
 func (vc *VoteChain) GetAllDelegates(ctx context.Context) ([]models.Delegate, error) {
-	tx, err := vc.storage.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
-	if err != nil {
-		return nil, fmt.Errorf("chain.GetDelegates: can't start transaction: %w", err)
-	}
-	defer tx.Rollback(ctx)
-
-	delegates, err := vc.storage.GetAllDelegates(ctx, tx)
+	var delegates []models.Delegate
+	err := vc.inTx(ctx, func(tx pgx.Tx) error {
+		var err error
+		delegates, err = vc.storage.GetAllDelegates(ctx, tx)
+		return err
+	})
 	if err != nil {
 		return nil, fmt.Errorf("chain.GetDelegates: %w", err)
 	}
-
 	return delegates, nil
 }
 
 func (vc *VoteChain) VerificateDelegate(ctx context.Context, delegateID int, telegramId sql.NullInt64) error {
-	tx, err := vc.storage.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
-	if err != nil {
-		return fmt.Errorf("chain.UpdateDelegate: can't start transaction: %w", err)
-	}
-	defer tx.Rollback(ctx)
-
-	delegate, err := vc.storage.GetDelegateByDelegateID(ctx, tx, delegateID)
-	if err != nil {
-		return fmt.Errorf("chain.UpdateDelegate: %w", err)
-	}
-	if delegate == nil {
-		return fmt.Errorf("chain.UpdateDelegate: delegate not found")
-	}
-	// Повторная привязка перехватила бы уже зарегистрированного делегата (устаревший код с другого аккаунта)
-	if delegate.TelegramID.Valid && delegate.TelegramID.Int64 != telegramId.Int64 {
-		return fmt.Errorf("chain.UpdateDelegate: delegate %d: %w", delegateID, ErrAlreadyVerified)
-	}
-
-	delegate.TelegramID = telegramId
-	err = vc.storage.UpdateDelegate(ctx, tx, *delegate)
+	err := vc.inTx(ctx, func(tx pgx.Tx) error {
+		delegate, err := vc.storage.GetDelegateByDelegateID(ctx, tx, delegateID)
+		if err != nil {
+			return err
+		}
+		if delegate == nil {
+			return fmt.Errorf("delegate not found")
+		}
+		// Повторная привязка перехватила бы уже зарегистрированного делегата (устаревший код с другого аккаунта)
+		if delegate.TelegramID.Valid && delegate.TelegramID.Int64 != telegramId.Int64 {
+			return fmt.Errorf("delegate %d: %w", delegateID, ErrAlreadyVerified)
+		}
+		delegate.TelegramID = telegramId
+		return vc.storage.UpdateDelegate(ctx, tx, *delegate)
+	})
 	if err != nil {
 		return fmt.Errorf("chain.UpdateDelegate: %w", err)
-	}
-
-	if err = tx.Commit(ctx); err != nil {
-		return fmt.Errorf("chain.UpdateDelegate: can't commit transaction: %w", err)
 	}
 	return nil
 }
 
+// DeleteDelegate удаляет делегата, только если он не голосовал: проверка и удаление в одной транзакции,
+// поэтому голос, поданный одновременно с удалением, не пропадёт (конфликт сериализации → повтор → отказ)
 func (vc *VoteChain) DeleteDelegate(ctx context.Context, delegateID int) error {
-	tx, err := vc.storage.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
-	if err != nil {
-		return fmt.Errorf("chain.DeleteDelegate: can't start transaction: %w", err)
-	}
-	defer tx.Rollback(ctx)
-
-	delegate, err := vc.storage.GetDelegateByDelegateID(ctx, tx, delegateID)
+	err := vc.inTx(ctx, func(tx pgx.Tx) error {
+		delegate, err := vc.storage.GetDelegateByDelegateID(ctx, tx, delegateID)
+		if err != nil {
+			return err
+		}
+		if delegate == nil {
+			return fmt.Errorf("delegate not found")
+		}
+		vote, err := vc.storage.GetVoteByDelegateID(ctx, tx, delegateID)
+		if err != nil {
+			return err
+		}
+		if delegate.HasVoted || vote != nil {
+			return fmt.Errorf("delegate %d: %w", delegateID, ErrDelegateHasVoted)
+		}
+		return vc.storage.DeleteDelegate(ctx, tx, delegateID)
+	})
 	if err != nil {
 		return fmt.Errorf("chain.DeleteDelegate: %w", err)
-	}
-	if delegate == nil {
-		return fmt.Errorf("chain.DeleteDelegate: delegate not found")
-	}
-
-	if err := vc.storage.DeleteDelegate(ctx, tx, delegateID); err != nil {
-		return fmt.Errorf("chain.DeleteDelegate: %w", err)
-	}
-
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("chain.DeleteDelegate: can't commit transaction: %w", err)
 	}
 	return nil
 }
-func (vc *VoteChain) CheckExistDelegateByDelegateID(ctx context.Context, delegateID int) (bool, error) {
-	tx, err := vc.storage.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
-	if err != nil {
-		return false, fmt.Errorf("chain.CheckExistDelegateByEmail: can't start transaction: %w", err)
-	}
-	defer tx.Rollback(ctx)
 
-	delegate, err := vc.storage.GetDelegateByDelegateID(ctx, tx, delegateID)
+func (vc *VoteChain) CheckExistDelegateByDelegateID(ctx context.Context, delegateID int) (bool, error) {
+	var exists bool
+	err := vc.inTx(ctx, func(tx pgx.Tx) error {
+		delegate, err := vc.storage.GetDelegateByDelegateID(ctx, tx, delegateID)
+		exists = delegate != nil
+		return err
+	})
 	if err != nil {
 		return false, fmt.Errorf("chain.CheckExistDelegateByEmail: %w", err)
 	}
-	if delegate == nil {
-		return false, nil
-	}
-	return true, nil
+	return exists, nil
 }
 
 func (vc *VoteChain) CheckExistDelegateByTelegramID(ctx context.Context, telegramID int64) (bool, error) {
-	tx, err := vc.storage.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
-	if err != nil {
-		return false, fmt.Errorf("chain.CheckExistDelegateByTelegramID: can't start transaction: %w", err)
-	}
-	defer tx.Rollback(ctx)
-
-	delegate, err := vc.storage.GetDelegateByTelegramID(ctx, tx, telegramID)
+	var exists bool
+	err := vc.inTx(ctx, func(tx pgx.Tx) error {
+		delegate, err := vc.storage.GetDelegateByTelegramID(ctx, tx, telegramID)
+		exists = delegate != nil
+		return err
+	})
 	if err != nil {
 		return false, fmt.Errorf("chain.CheckExistDelegateByTelegramID: %w", err)
 	}
-	if delegate == nil {
-		return false, nil
-	}
-	return true, nil
+	return exists, nil
 }
 
 func (vc *VoteChain) CheckFerification(ctx context.Context, delegateID int) (bool, error) {
-	tx, err := vc.storage.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
-	if err != nil {
-		return false, fmt.Errorf("chain.CheckFerification: can't start transaction: %w", err)
-	}
-	defer tx.Rollback(ctx)
-
-	delegate, err := vc.storage.GetDelegateByDelegateID(ctx, tx, delegateID)
+	var verified bool
+	err := vc.inTx(ctx, func(tx pgx.Tx) error {
+		delegate, err := vc.storage.GetDelegateByDelegateID(ctx, tx, delegateID)
+		// нет делегата — нет и верификации
+		verified = delegate != nil && delegate.TelegramID.Valid
+		return err
+	})
 	if err != nil {
 		return false, fmt.Errorf("chain.CheckFerification: %w", err)
 	}
-	if delegate == nil { // нет делегата — нет и верификации
-		return false, nil
-	}
-	if delegate.TelegramID.Valid {
-		return true, nil
-	}
-
-	return false, nil
+	return verified, nil
 }

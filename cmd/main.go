@@ -20,6 +20,13 @@ import (
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
 
+// Таймауты запросов к Telegram Bot API: ответ — не дольше telegramResponseTimeout после отправки запроса;
+// весь запрос вместе с загрузкой файла (/csv, /send_logs) — не дольше telegramRequestTimeout
+const (
+	telegramResponseTimeout = 15 * time.Second
+	telegramRequestTimeout  = 2 * time.Minute
+)
+
 func main() {
 	// Загружаем конфигурацию
 	if err := config.LoadConfig(); err != nil {
@@ -35,8 +42,12 @@ func main() {
 
 	voteChain := chain.NewVoteChain(storage)
 
-	// Инициализируем бота
-	botAPI, err := tgbotapi.NewBotAPI(config.TelegramAPIToken)
+	// Инициализируем бота. У HTTP-клиента есть таймауты: без них один зависший запрос к Telegram
+	// держал бы обработку этого пользователя (а раньше — всех) бесконечно
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.ResponseHeaderTimeout = telegramResponseTimeout
+	botAPI, err := tgbotapi.NewBotAPIWithClient(config.TelegramAPIToken, tgbotapi.APIEndpoint,
+		&http.Client{Timeout: telegramRequestTimeout, Transport: transport})
 	if err != nil {
 		log.Fatalf("unable to connect botAPI: %v", err)
 	}
