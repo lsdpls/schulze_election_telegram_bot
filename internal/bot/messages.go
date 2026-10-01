@@ -52,7 +52,7 @@ const (
 	// handleCodeInput: для аккаунта нет ожидающего кода (бот перезапускался или код удалён)
 	msgRegCodeNotFound = "Не найден код для подтверждения. Попробуйте начать регистрацию заново."
 	// handleCodeInput: код не совпал
-	msgRegWrongCode = "Неверный код. Попробуйте еще раз."
+	msgRegWrongCode = "Неверный код. Попробуйте еще раз. Если проблема не решается, напишите организатору @ss_pmpu"
 	// handleCodeInput: maxCodeAttempts неверных кодов подряд — код аннулирован
 	msgRegTooManyAttempts = "Слишком много неверных попыток, код аннулирован. Начните заново: /start"
 	// handleCodeInput: делегат успел зарегистрироваться с другого аккаунта (chain.ErrAlreadyVerified)

@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/lsdpls/schulze_election_telegram_bot/internal/chain"
 	"github.com/lsdpls/schulze_election_telegram_bot/internal/models"
@@ -539,17 +540,65 @@ func formatCandidates(candidates []models.Candidate) string {
 	return strings.Join(parts, ", ")
 }
 
+// Строка, которой GetResultsString завершает блок каждого курса
+const printBlockSeparator = "—————\n"
+
+// packBlocks собирает блоки в сообщения не длиннее maxSize байт, не разрывая блок; блок длиннее maxSize
+// делится по строкам (splitMessage)
+func packBlocks(blocks []string, maxSize int) []string {
+	var msgParts []string
+	var cur strings.Builder
+	for _, block := range blocks {
+		if block == "" {
+			continue
+		}
+		if cur.Len()+len(block) > maxSize && cur.Len() > 0 {
+			msgParts = append(msgParts, cur.String())
+			cur.Reset()
+		}
+		if len(block) > maxSize {
+			msgParts = append(msgParts, splitMessage(block, maxSize)...)
+			continue
+		}
+		cur.WriteString(block)
+	}
+	if cur.Len() > 0 {
+		msgParts = append(msgParts, cur.String())
+	}
+	return msgParts
+}
+
 // TODO: move to utils
-// Функция для разбивки сообщения на части по заданному размеру
+// splitMessage делит текст на части не длиннее maxSize байт по границам строк: HTML-теги /print стоят
+// внутри одной строки, поэтому каждая часть остаётся с закрытыми тегами и целыми буквами.
+// Строку длиннее maxSize (в /print таких нет) режет по границе символа
 func splitMessage(message string, maxSize int) []string {
 	var msgParts []string
-	for len(message) > maxSize {
-		msgParts = append(msgParts, message[:maxSize])
-		message = message[maxSize:]
+	var cur strings.Builder
+	flush := func() {
+		if cur.Len() > 0 {
+			msgParts = append(msgParts, cur.String())
+			cur.Reset()
+		}
 	}
-	if len(message) > 0 {
-		msgParts = append(msgParts, message)
+	for _, line := range strings.SplitAfter(message, "\n") {
+		if line == "" {
+			continue
+		}
+		if cur.Len()+len(line) > maxSize {
+			flush()
+		}
+		for len(line) > maxSize {
+			cut := maxSize
+			for cut > 0 && !utf8.RuneStart(line[cut]) {
+				cut--
+			}
+			msgParts = append(msgParts, line[:cut])
+			line = line[cut:]
+		}
+		cur.WriteString(line)
 	}
+	flush()
 	return msgParts
 }
 
@@ -560,8 +609,8 @@ func (b *Bot) handlePrint(_ context.Context, message *tgbotapi.Message) {
 		log.Errorf("%d %v", message.Chat.ID, err)
 		return
 	}
-	// Разбиваем результаты на сообщения по 4096 символов
-	msgParts := splitMessage(resultsString, 4096)
+	// Разбиваем результаты на сообщения до 4096 байт: целыми блоками курсов, а блок длиннее — по строкам
+	msgParts := packBlocks(strings.SplitAfter(resultsString, printBlockSeparator), 4096)
 
 	// Отправляем сообщения по очереди
 	for _, msgPart := range msgParts {

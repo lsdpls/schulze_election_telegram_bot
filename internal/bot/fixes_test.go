@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	mocks "github.com/lsdpls/schulze_election_telegram_bot/internal/bot/mocks"
 	"github.com/lsdpls/schulze_election_telegram_bot/internal/chain"
@@ -596,5 +597,48 @@ func TestStartWithoutPendingCodeAsksEmail(t *testing.T) {
 	}
 	if _, _, state := pending(t, b, 1); state != StateWaitingForEmail {
 		t.Fatalf("состояние %q", state)
+	}
+}
+
+// /print: длинный текст с русскими именами и тегами <b> делится по строкам — каждая часть не длиннее 4096 байт,
+// без разрезанных букв и с закрытыми тегами, а вместе части дают исходный текст
+func TestSplitMessageKeepsTagsAndRunes(t *testing.T) {
+	var sb strings.Builder
+	for i := 0; i < 40; i++ {
+		fmt.Fprintf(&sb, "<b>Курс: %d бакалавриат</b>\n<b>Победители: st1177%02d Евтюков Лев Николаевич; st1294%02d Клименов Илья Иванович;</b>\nТаблица парных предпочтений:\n117790    129477    139957\n—————\n", i%4+1, i, i)
+	}
+	text := sb.String()
+	if len(text) <= 4096 {
+		t.Fatalf("тест должен проверять текст длиннее 4096 байт, а он %d", len(text))
+	}
+	parts := splitMessage(text, 4096)
+	if len(parts) < 2 || strings.Join(parts, "") != text {
+		t.Fatalf("частей %d, склейка совпадает: %v", len(parts), strings.Join(parts, "") == text)
+	}
+	for i, p := range parts {
+		if len(p) > 4096 || !utf8.ValidString(p) || strings.Count(p, "<b>") != strings.Count(p, "</b>") {
+			t.Fatalf("часть %d: %d байт, utf8=%v, <b>=%d </b>=%d", i, len(p), utf8.ValidString(p), strings.Count(p, "<b>"), strings.Count(p, "</b>"))
+		}
+	}
+}
+
+// /print: блоки курсов не разрываются между сообщениями; блок длиннее лимита делится по строкам
+func TestPackBlocksKeepsCourseBlocks(t *testing.T) {
+	small := "<b>Курс: 1 бакалавриат</b>\n<b>Победители: st152731 Гельманов Никита Николаевич;</b>\n" + strings.Repeat("152731    —    1    1\n", 60) + printBlockSeparator
+	big := "<b>Курс: Общие места</b>\n" + strings.Repeat("<b>Победители: st140136 Волков Владимир Михайлович;</b>\n", 120) + printBlockSeparator
+	parts := packBlocks([]string{small, small, big, small}, 4096)
+	if strings.Join(parts, "") != small+small+big+small {
+		t.Fatal("склейка не совпадает")
+	}
+	for i, p := range parts {
+		if len(p) > 4096 || !utf8.ValidString(p) || strings.Count(p, "<b>") != strings.Count(p, "</b>") {
+			t.Fatalf("часть %d: %d байт", i, len(p))
+		}
+		if strings.Contains(p, "Курс: 1 бакалавриат") && !strings.HasSuffix(p, printBlockSeparator) {
+			t.Fatalf("часть %d обрывает блок курса", i)
+		}
+	}
+	if !strings.HasPrefix(parts[0], "<b>Курс: 1 бакалавриат</b>") || !strings.HasSuffix(parts[0], printBlockSeparator) {
+		t.Fatalf("первое сообщение должно состоять из целых блоков:\n%.80s … %.40s", parts[0], parts[0][len(parts[0])-40:])
 	}
 }
