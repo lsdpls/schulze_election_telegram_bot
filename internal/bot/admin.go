@@ -376,6 +376,7 @@ func (b *Bot) handleStartVoting(_ context.Context, message *tgbotapi.Message) {
 	b.mu.Lock()
 	b.activeVoting = true
 	b.mu.Unlock()
+	noteVotingState(true)
 	log.Warn(message.From.ID, " Голосование открыто!")
 }
 
@@ -386,6 +387,7 @@ func (b *Bot) handleStopVoting(_ context.Context, message *tgbotapi.Message) {
 	b.mu.Lock()
 	b.activeVoting = false
 	b.mu.Unlock()
+	noteVotingState(false)
 	log.Warn(message.From.ID, " Голосование закрыто!")
 }
 

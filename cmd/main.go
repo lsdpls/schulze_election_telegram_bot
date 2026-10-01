@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"os"
 	"os/signal"
@@ -61,6 +62,8 @@ func main() {
 	// Инициализация объекта бота
 	botHandler := bot.NewBot(botAPI, voteChain, schulze)
 	defer botHandler.Close()
+	// Сообщение о запуске в лог и лог-чат: как завершился прошлый запуск, что потеряно из памяти, что в базе
+	botHandler.LogStartup(context.Background())
 
 	// Инициализируем API handler
 	apiHandler := api.NewHandler(voteChain)
@@ -92,7 +95,9 @@ func main() {
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, os.Interrupt, syscall.SIGINT, syscall.SIGTERM)
 
-	<-quit
+	sig := <-quit
+	// Сообщение об остановке в лог и лог-чат: что сейчас пропадёт из памяти бота
+	botHandler.LogShutdown(fmt.Sprintf("сигнал %s", sig))
 	log.Infoln("Shutting down bot...")
 	botAPI.StopReceivingUpdates()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
